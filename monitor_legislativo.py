@@ -141,12 +141,12 @@ def _senado_textos_api(codigo_materia):
     tries = [
         f"https://legis.senado.leg.br/dadosabertos/materia/textos/{codigo_materia}.json",
         f"https://legis.senado.leg.br/dadosabertos/materia/{codigo_materia}/textos.json",
-        f"https://legis.senado.leg.br/dadosabertos/materia/{codigo_materia}.json",  # fallback amplo
+        f"https://legis.senado.leg.br/dadosabertos/materia/{codigo_materia}.json",
     ]
     for u in tries:
         try:
             r = requests.get(u, timeout=30, headers=HDR)
-            if r.status_code != 200: 
+            if r.status_code != 200:
                 continue
             j = r.json()
             textos = (_dig(j, ("TextoMateria","Textos","Texto"))
@@ -177,7 +177,8 @@ def _senado_inteiro_teor_api(codigo_materia):
             return url, (str(data) if data else None)
 
     prefer = ("projeto","parecer","substitutivo","emenda","requerimento","texto")
-    # 2) PDFs com descrições preferidas
+
+    # 2) PDFs preferidos
     for t in textos:
         desc, form, url, data = extract(t)
         if isinstance(url, str) and url.startswith("http"):
@@ -275,7 +276,7 @@ def senado_df_hoje() -> pd.DataFrame:
         numero = _get(m, "Numero") or _get(dados, "NumeroMateria") or _get(ident, "NumeroMateria")
         ano    = _get(m, "Ano")    or _get(dados, "AnoMateria")    or _get(ident, "AnoMateria")
         data   = _get(m, "Data")   or _get(dados, "DataApresentacao") or _get(m, "DataApresentacao")
-        ementa = (_get(m, "Ementa") or _get(dados, "EmentaMateria") or _get(m, "EmentaMateria") or "") 
+        ementa = (_get(m, "Ementa") or _get(dados, "EmentaMateria") or _get(m, "EmentaMateria") or "")
 
         # Autoria
         autor_str = _get(m, "Autor")
@@ -288,8 +289,8 @@ def senado_df_hoje() -> pd.DataFrame:
                 for a in alist or []:
                     if not isinstance(a, dict): continue
                     nome = a.get("NomeAutor") or a.get("NomeParlamentar")
-                    partido = (a.get("SiglaPartidoAutor") or a.get("SiglaPartido") or
-                               a.get("PartidoAutor") or a.get("Partido"))
+                    partido = (a.get("SiglaPartidoAutor") or a.get("SiglaPartido")
+                               or a.get("PartidoAutor") or a.get("Partido"))
                     uf = a.get("UfAutor") or a.get("SiglaUF") or a.get("UF")
                     if nome: nomes.append(nome)
                     partidos.append(partido if partido else None)
@@ -304,11 +305,15 @@ def senado_df_hoje() -> pd.DataFrame:
 
         it_url, _ = _senado_inteiro_teor(codigo)
 
+        # >>> Data como date real e Ingest At como datetime real (naive p/ Google Sheets)
+        data_date = pd.to_datetime(data, errors="coerce").date() if data else None
+        ingest_dt = now_br().replace(tzinfo=None)
+
         rows.append({
             "UID": f"Senado:{codigo}",
             "Casa Atual": "Senado",
             "Sigla": sigla, "Número": numero, "Ano": ano,
-            "Data Apresentação": (pd.to_datetime(data, errors="coerce").strftime("%Y-%m-%d") if data else ""),
+            "Data Apresentação": data_date,
             "Ementa": ementa,
             "Palavras Chave": _extract_keywords(ementa),
             "Autor": autor_str or "",
@@ -316,7 +321,7 @@ def senado_df_hoje() -> pd.DataFrame:
             "Autor UFs": ", ".join([u for u in ufs if u]) if any(ufs) else "",
             "Link Página": f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo}",
             "Inteiro Teor URL": it_url or "",
-            "Ingest At": now_br().strftime("%Y-%m-%d %H:%M:%S"),
+            "Ingest At": ingest_dt,
         })
 
     df = pd.DataFrame(rows)
@@ -385,7 +390,7 @@ def _camara_inteiro_teor(prop_id:int):
             dados = r.json().get("dados", {})
             u = dados.get("urlInteiroTeor")
             if isinstance(u, str) and u.startswith("http"):
-                return u, ""  # detalhe não dá data separada
+                return u, ""
     except Exception:
         pass
     # 2) /inteiroTeor
@@ -449,13 +454,16 @@ def camara_df_hoje() -> pd.DataFrame:
 
             ementa = d.get("ementa", "") or ""
 
+            data_date = pd.to_datetime(data, errors="coerce").date() if data else None
+            ingest_dt = now_br().replace(tzinfo=None)
+
             rows.append({
                 "UID": f"Camara:{pid}",
                 "Casa Atual": "Camara",
                 "Sigla": d.get("siglaTipo"),
                 "Número": d.get("numero"),
                 "Ano": d.get("ano"),
-                "Data Apresentação": data or "",
+                "Data Apresentação": data_date,
                 "Ementa": ementa,
                 "Palavras Chave": _extract_keywords(ementa),
                 "Autor": autores.get("autor",""),
@@ -463,7 +471,7 @@ def camara_df_hoje() -> pd.DataFrame:
                 "Autor UFs": autores.get("autor_ufs",""),
                 "Link Página": f"https://www.camara.leg.br/propostas-legislativas/{pid}",
                 "Inteiro Teor URL": it_url or "",
-                "Ingest At": now_br().strftime("%Y-%m-%d %H:%M:%S"),
+                "Ingest At": ingest_dt,
             })
         next_link = next((lk for lk in j.get("links", []) if lk.get("rel")=="next"), None)
         if not next_link: break
@@ -493,12 +501,22 @@ NEEDED_COLUMNS = [
 ]
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    # garantir que todas existam
+    # garantir existência
     for col in NEEDED_COLUMNS:
         if col not in df.columns:
-            df[col] = ""
-    for c in NEEDED_COLUMNS:
+            df[col] = None
+
+    # Data Apresentação -> date; Ingest At -> datetime
+    if "Data Apresentação" in df.columns:
+        df["Data Apresentação"] = pd.to_datetime(df["Data Apresentação"], errors="coerce").dt.date
+    if "Ingest At" in df.columns:
+        # remover timezone para o Google Sheets
+        df["Ingest At"] = pd.to_datetime(df["Ingest At"], errors="coerce").dt.tz_localize(None)
+
+    # demais como string (sem mexer nas duas acima)
+    for c in [x for x in NEEDED_COLUMNS if x not in ("Data Apresentação","Ingest At")]:
         df[c] = df[c].fillna("").astype(str)
+
     return df[NEEDED_COLUMNS].copy()
 
 def _ensure_header(ws, header):
@@ -554,7 +572,7 @@ def main():
     print(f"Senado: {len(senado)} linhas | Câmara: {len(camara)} linhas")
 
     if not SPREADSHEET_ID:
-        # modo local (debug): salva CSVs
+        # modo local (debug): salva CSVs (ISO -> Sheets reconhece)
         stamp = today_compact()
         senado.to_csv(f"senado_{stamp}.csv", index=False)
         camara.to_csv(f"camara_{stamp}.csv", index=False)
