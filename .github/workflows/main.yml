@@ -1,0 +1,39 @@
+name: Monitor Legislativo
+
+on:
+  schedule:
+    - cron: "0 10,14,18,22 * * *"  # 07/11/15/19 BRT
+    - cron: "0 2 * * *"            # 23 BRT (02 UTC do dia seguinte)
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Write service account key
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY_JSON }}
+        run: |
+          echo "$GCP_SA_KEY" > credentials.json
+
+      - name: Run collector
+        env:
+          SPREADSHEET_ID: "15IbcKPsHGQ6lyCXX66HVuNczboLecZbZz7fwVfgIKXc"
+          SHEET_SENADO: "Senado"
+          SHEET_CAMARA: "Camara"
+          GOOGLE_APPLICATION_CREDENTIALS: "credentials.json"
+        run: |
+          python monitor_legislativo.py
