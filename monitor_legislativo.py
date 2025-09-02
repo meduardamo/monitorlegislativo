@@ -52,7 +52,7 @@ def _normalize(text: str) -> str:
     if text is None: return ""
     t = unicodedata.normalize("NFD", str(text))
     t = "".join(c for c in t if unicodedata.category(c) != "Mn")
-    return t.lower()
+    return t.lower().strip()
 
 PALAVRAS_CHAVE = [
     'Infância','Criança','Infantil','Infâncias','Crianças',
@@ -71,67 +71,35 @@ PALAVRAS_CHAVE = [
     'Cigarro Eletrônico','Controle de Tabaco','Violência Doméstica',
     'Exposição a Fatores de Risco','Departamento de Saúde Mental',
     'Hipertensão Arterial','Alimentação Escolar','PNAE','Agora Tem Especialistas',
-
-    # --- Alfabetização geral ---
-    'Alfabetização',
-    'Alfabetização na Idade Certa',
-    'Criança Alfabetizada',
-    'Meta de Alfabetização',
-    'Plano Nacional de Alfabetização',
-    'Programa Criança Alfabetizada',
-    'Idade Certa para Alfabetização',
-    'Alfabetização de Crianças',
-    'Alfabetização Inicial',
-    'Alfabetização Plena',
-    'Alfabetização em Língua Portuguesa',
-    'Analfabetismo',
-    'Erradicação do Analfabetismo',
-    'Programa Nacional de Alfabetização na Idade Certa',
-    'Pacto pela Alfabetização',
-    'Política Nacional de Alfabetização',
-    'Recomposição das Aprendizagens em Alfabetização',
-    'Competências de Alfabetização',
-    'Avaliação da Alfabetização',
-    'Saeb Alfabetização',
-
-    # --- Matemática (Educação Básica) ---
-    'Alfabetização Matemática',
-    'Analfabetismo Matemático',
-    'Aprendizagem em Matemática',
-    'Recomposição das Aprendizagens em Matemática',
-    'Recomposição de Aprendizagem',
-    'Competências Matemáticas',
-    'Proficiência em Matemática',
-    'Avaliação Diagnóstica de Matemática',
-    'Avaliação Formativa de Matemática',
-    'Política Nacional de Matemática',
-    'Saeb Matemática',
-    'Ideb Matemática',
-    'BNCC Matemática',
-    'Matemática no Ensino Fundamental',
-    'Matemática no Ensino Médio',
-    'Anos Iniciais de Matemática',
-    'Anos Finais de Matemática',
-    'OBMEP',
-    'Olimpíada Brasileira de Matemática das Escolas Públicas',
-    'Olimpíada de Matemática',
-    'PNLD Matemática'
+    # Alfabetização geral
+    'Alfabetização','Alfabetização na Idade Certa','Criança Alfabetizada','Meta de Alfabetização',
+    'Plano Nacional de Alfabetização','Programa Criança Alfabetizada','Idade Certa para Alfabetização',
+    'Alfabetização de Crianças','Alfabetização Inicial','Alfabetização Plena',
+    'Alfabetização em Língua Portuguesa','Analfabetismo','Erradicação do Analfabetismo',
+    'Programa Nacional de Alfabetização na Idade Certa','Pacto pela Alfabetização',
+    'Política Nacional de Alfabetização','Recomposição das Aprendizagens em Alfabetização',
+    'Competências de Alfabetização','Avaliação da Alfabetização','Saeb Alfabetização',
+    # Matemática (Educação Básica)
+    'Alfabetização Matemática','Analfabetismo Matemático','Aprendizagem em Matemática',
+    'Recomposição das Aprendizagens em Matemática','Recomposição de Aprendizagem',
+    'Competências Matemáticas','Proficiência em Matemática','Avaliação Diagnóstica de Matemática',
+    'Avaliação Formativa de Matemática','Política Nacional de Matemática','Saeb Matemática',
+    'Ideb Matemática','BNCC Matemática','Matemática no Ensino Fundamental','Matemática no Ensino Médio',
+    'Anos Iniciais de Matemática','Anos Finais de Matemática','OBMEP',
+    'Olimpíada Brasileira de Matemática das Escolas Públicas','Olimpíada de Matemática','PNLD Matemática'
 ]
-
 _PAL_CHAVE_NORM = [(kw, _normalize(kw)) for kw in PALAVRAS_CHAVE]
 
 def _extract_keywords(texto: str) -> str:
-    """Devolve as palavras-chave encontradas (separadas por '; ')."""
     nt = _normalize(texto)
     achadas = []
     for original, norm_kw in _PAL_CHAVE_NORM:
         if norm_kw and norm_kw in nt:
             achadas.append(original)
-    return "; ".join(dict.fromkeys(achadas).keys())  # dedup preservando ordem
+    return "; ".join(dict.fromkeys(achadas).keys())
 
 # ====================== Helpers de DATA/HORA (USER_ENTERED) ======================
 def _fmt_date(v) -> str:
-    """YYYY-MM-DD ou '' (string para USER_ENTERED no Sheets)."""
     try:
         d = pd.to_datetime(v, errors="coerce")
         if pd.isna(d): return ""
@@ -140,7 +108,6 @@ def _fmt_date(v) -> str:
         return ""
 
 def _fmt_dt(v) -> str:
-    """YYYY-MM-DD HH:MM:SS ou '' (string para USER_ENTERED no Sheets)."""
     try:
         d = pd.to_datetime(v, errors="coerce")
         if pd.isna(d): return ""
@@ -159,7 +126,6 @@ from bs4 import BeautifulSoup
 BASE_PESQUISA_SF = "https://legis.senado.leg.br/dadosabertos/materia/pesquisa/lista.json"
 
 def _senado_textos_api(codigo_materia):
-    """Retorna lista de dicts de textos da matéria (ou [])."""
     tries = [
         f"https://legis.senado.leg.br/dadosabertos/materia/textos/{codigo_materia}.json",
         f"https://legis.senado.leg.br/dadosabertos/materia/{codigo_materia}/textos.json",
@@ -180,7 +146,6 @@ def _senado_textos_api(codigo_materia):
     return []
 
 def _senado_inteiro_teor_api(codigo_materia):
-    """Retorna (url, dataTexto) ou (None, None)."""
     textos = _senado_textos_api(codigo_materia)
     if not textos:
         return None, None
@@ -192,27 +157,23 @@ def _senado_inteiro_teor_api(codigo_materia):
         data = td.get("DataTexto") or td.get("Data")
         return desc, form, url, data
 
-    # 1) Avulso inicial
     for t in textos:
         desc, form, url, data = extract(t)
         if desc.lower() == "avulso inicial da matéria" and isinstance(url, str) and url.startswith("http"):
             return url, (str(data) if data else None)
 
     prefer = ("projeto","parecer","substitutivo","emenda","requerimento","texto")
-    # 2) PDFs preferidos
     for t in textos:
         desc, form, url, data = extract(t)
         if isinstance(url, str) and url.startswith("http"):
             if ("pdf" in form or url.lower().endswith(".pdf")) and any(k in desc.lower() for k in prefer):
                 return url, (str(data) if data else None)
 
-    # 3) qualquer PDF
     for t in textos:
         desc, form, url, data = extract(t)
         if isinstance(url, str) and url.startswith("http") and ("pdf" in form or url.lower().endswith(".pdf")):
             return url, (str(data) if data else None)
 
-    # 4) primeiro http válido
     for t in textos:
         desc, form, url, data = extract(t)
         if isinstance(url, str) and url.startswith("http"):
@@ -221,7 +182,6 @@ def _senado_inteiro_teor_api(codigo_materia):
     return None, None
 
 def _senado_inteiro_teor_page(codigo_materia):
-    """Fallback pela página pública. Retorna (url, None)."""
     page = f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo_materia}"
     try:
         r = requests.get(page, timeout=40, headers=HDR)
@@ -250,29 +210,46 @@ def _senado_inteiro_teor(codigo_materia):
 
 def _senado_primeira_autoria_da_pagina(codigo_materia) -> str | None:
     """
-    Abre a página pública da matéria e retorna o conteúdo da PRIMEIRA 'Autoria:'.
-    Útil quando a API traz 'Câmara dos Deputados' como autor.
+    Abre o Link Página e retorna o conteúdo da PRIMEIRA linha 'Autoria:'.
+    Estrutura típica: div.bg-info-conteudo > .row > div.span12.sf-bloco-paragrafos-condensados > <p><strong>Autoria:</strong><span>...</span></p>
     """
-    page = f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo_materia}"
+    url = f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo_materia}"
     try:
-        r = requests.get(page, timeout=40, headers=HDR)
+        r = requests.get(url, timeout=45, headers=HDR)
         if r.status_code != 200:
             return None
         soup = BeautifulSoup(r.text, "html.parser")
-        # bloco onde geralmente fica o cabeçalho da matéria
-        info = soup.select_one("div.bg-info-conteudo") or soup
-        for p in info.select("p"):
-            strong = p.find("strong")
-            if strong and _normalize(strong.get_text()) == "autoria:":
-                span = p.find("span")
-                if span:
-                    val = span.get_text(strip=True)
-                    return val if val else None
+
+        # procurar no bloco mais específico; se não existir, procurar no documento inteiro
+        holders = soup.select("div.span12.sf-bloco-paragrafos-condensados")
+        if not holders:
+            holders = soup.select("div.bg-info-conteudo")
+        if not holders:
+            holders = [soup]
+
+        for holder in holders:
+            for p in holder.find_all("p"):
+                strong = p.find("strong")
+                if not strong:
+                    continue
+                label = _normalize(strong.get_text(" ", strip=True).rstrip(":"))
+                if label == "autoria":
+                    # método 1: usar o span logo após
+                    span = p.find("span")
+                    if span:
+                        val = span.get_text(" ", strip=True)
+                        if val:
+                            return val
+                    # método 2: texto do <p> removendo o prefixo 'Autoria:'
+                    full = p.get_text(" ", strip=True)
+                    val = re.sub(r'(?i)^\s*autoria\s*:\s*', "", full).strip()
+                    if val:
+                        return val
         return None
     except Exception:
         return None
 
-# Regex para extrair (PARTIDO/UF) quando vier como string única
+# Regex para extrair (PARTIDO/UF) se vier como "Nome (PARTIDO/UF)"
 _rx_autor_chunk = re.compile(r"""\s*
     (?P<nome>.+?)
     (?:\s*\(\s*(?P<partido>[A-ZÀ-Ü\-]+)\s*/\s*(?P<uf>[A-Z]{2})\s*\))?
@@ -323,7 +300,7 @@ def senado_df_hoje() -> pd.DataFrame:
         data   = _get(m, "Data")   or _get(dados, "DataApresentacao") or _get(m, "DataApresentacao")
         ementa = (_get(m, "Ementa") or _get(dados, "EmentaMateria") or _get(m, "EmentaMateria") or "")
 
-        # Autoria (da API)
+        # Autoria (API)
         autor_str = _get(m, "Autor")
         nomes, partidos, ufs = [], [], []
         for bloco in ("Autoria","Autores"):
@@ -334,19 +311,19 @@ def senado_df_hoje() -> pd.DataFrame:
                 for a in alist or []:
                     if not isinstance(a, dict): continue
                     nome = a.get("NomeAutor") or a.get("NomeParlamentar")
-                    partido = (a.get("SiglaPartidoAutor") or a.get("SiglaPartido") or
-                               a.get("PartidoAutor") or a.get("Partido"))
+                    partido = (a.get("SiglaPartidoAutor") or a.get("SiglaPartido")
+                               or a.get("PartidoAutor") or a.get("Partido"))
                     uf = a.get("UfAutor") or a.get("SiglaUF") or a.get("UF")
                     if nome: nomes.append(nome)
                     partidos.append(partido if partido else None)
                     ufs.append(uf if uf else None)
 
-        # Se vier "Câmara dos Deputados", buscar a PRIMEIRA "Autoria:" na página pública
+        # >>> Caso especial: Autor == "Câmara dos Deputados" -> pegar PRIMEIRA 'Autoria:' da página
         if _normalize(autor_str) == _normalize("Câmara dos Deputados"):
             autor_page = _senado_primeira_autoria_da_pagina(codigo)
             if autor_page:
                 autor_str = autor_page
-                # tenta extrair partido/UF se vier entre parênteses (nem sempre é aplicável)
+                # tenta extrair partido/UF (quando aplicável)
                 n2, p2, u2 = _parse_autores_senado_texto(autor_page)
                 if n2 and not nomes: nomes = n2
                 if not any(partidos): partidos = p2
@@ -430,7 +407,6 @@ def _autores_camara_completo(prop_id:int) -> dict:
     }
 
 def _camara_inteiro_teor(prop_id:int):
-    # 1) campo urlInteiroTeor do detalhe
     try:
         r = requests.get(f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{prop_id}",
                          timeout=30, headers=HDR)
@@ -441,7 +417,6 @@ def _camara_inteiro_teor(prop_id:int):
                 return u, ""
     except Exception:
         pass
-    # 2) /inteiroTeor
     try:
         r = requests.get(f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{prop_id}/inteiroTeor",
                          timeout=30, headers=HDR)
@@ -453,13 +428,11 @@ def _camara_inteiro_teor(prop_id:int):
                     return u, (str(dt)[:19] if dt else "")
     except Exception:
         pass
-    # 3) /documentos
     try:
         r = requests.get(f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{prop_id}/documentos",
                          timeout=30, headers=HDR)
         if r.status_code == 200:
             docs = _as_list(r.json().get("dados", []))
-            # preferir "inteiro teor"
             for d in docs:
                 desc = (d.get("tipoDescricao") or d.get("titulo") or "").lower()
                 u = d.get("url") or d.get("uri") or d.get("link")
@@ -499,7 +472,6 @@ def camara_df_hoje() -> pd.DataFrame:
 
             autores = _autores_camara_completo(pid)
             it_url, _ = _camara_inteiro_teor(pid)
-
             ementa = d.get("ementa", "") or ""
 
             rows.append({
@@ -546,17 +518,14 @@ NEEDED_COLUMNS = [
 ]
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    # garantir que todas existam
     for col in NEEDED_COLUMNS:
         if col not in df.columns:
             df[col] = ""
-    # strings (Sheets interpretará datas por USER_ENTERED)
     for c in NEEDED_COLUMNS:
         df[c] = df[c].fillna("").astype(str)
     return df[NEEDED_COLUMNS].copy()
 
 def _ensure_header(ws, header):
-    """Se a aba existir mas estiver sem header (ou diferente), escreve o header."""
     first_row = ws.row_values(1)
     if first_row != header:
         ws.resize(rows=max(2, ws.row_count), cols=len(header))
@@ -584,12 +553,11 @@ def append_dedupe(df: pd.DataFrame, sheet_name: str):
     try:
         ws = sh.worksheet(sheet_name)
         _ensure_header(ws, NEEDED_COLUMNS)
-        existing = set(ws.col_values(1)[1:])  # UIDs existentes (ignora header)
+        existing = set(ws.col_values(1)[1:])
         new_df = df[~df["UID"].isin(existing)].copy()
         if new_df.empty:
             print(f"[{sheet_name}] nada novo para anexar.")
             return
-        # USER_ENTERED => Sheets interpreta "YYYY-MM-DD" e "YYYY-MM-DD HH:MM:SS"
         ws.append_rows(new_df.values.tolist(), value_input_option="USER_ENTERED")
         print(f"[{sheet_name}] adicionadas {len(new_df)} linhas novas.")
     except gspread.WorksheetNotFound:
@@ -609,7 +577,6 @@ def main():
     print(f"Senado: {len(senado)} linhas | Câmara: {len(camara)} linhas")
 
     if not SPREADSHEET_ID:
-        # modo local (debug): salva CSVs (ISO -> Sheets reconhece ao importar)
         stamp = today_compact()
         senado.to_csv(f"senado_{stamp}.csv", index=False)
         camara.to_csv(f"camara_{stamp}.csv", index=False)
