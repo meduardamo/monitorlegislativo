@@ -1,4 +1,4 @@
-name: coletar-proposicoes
+name: Monitor Legislativo
 
 on:
   schedule:
