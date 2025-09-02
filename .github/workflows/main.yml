@@ -2,8 +2,11 @@ name: coletar-proposicoes
 
 on:
   schedule:
-    - cron: "0 10,14,18,22 * * *"  # 07/11/15/19 BRT
-    - cron: "0 2 * * *"            # 23 BRT
+    - cron: "0 12 * * *"  # 09h BRT
+    - cron: "0 15 * * *"  # 12h BRT
+    - cron: "0 17 * * *"  # 14h BRT
+    - cron: "0 20 * * *"  # 17h BRT
+    - cron: "0 2 * * *"   # 23h BRT
   workflow_dispatch: {}
 
 jobs:
