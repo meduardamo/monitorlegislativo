@@ -1,5 +1,5 @@
 # monitor_legislativo.py
-import os, re, time, requests, pandas as pd
+import os, re, time, requests, pandas as pd, unicodedata
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -47,6 +47,89 @@ def _last_int_from_uri(u: str|None):
     except Exception:
         return None
 
+# ====================== Normalização / Palavras-chave ======================
+def _normalize(text: str) -> str:
+    if text is None: return ""
+    t = unicodedata.normalize("NFD", str(text))
+    t = "".join(c for c in t if unicodedata.category(c) != "Mn")
+    return t.lower()
+
+PALAVRAS_CHAVE = [
+    'Infância','Criança','Infantil','Infâncias','Crianças',
+    'Educação','Ensino','Escolaridade',
+    'Plano Nacional da Educação','PNE','Educacional',
+    'Alfabetização','Letramento',
+    'Saúde','Telessaúde','Telemedicina',
+    'Digital','Digitais','Prontuário',
+    'Programa Saúde na Escola','PSE',
+    'Psicosocial','Mental','Saúde Mental','Dados para a Saúde','Morte Evitável',
+    'Doenças Crônicas Não Transmissíveis','Rotulagem de Bebidas Alcoólicas',
+    'Educação em Saúde','Bebidas Alcoólicas','Imposto Seletivo',
+    'Rotulagem de Alimentos','Alimentos Ultraprocessados',
+    'Publicidade Infantil','Publicidade de Alimentos Ultraprocessados',
+    'Tributação de Bebidas Alcoólicas','Alíquota de Bebidas Alcoólicas',
+    'Cigarro Eletrônico','Controle de Tabaco','Violência Doméstica',
+    'Exposição a Fatores de Risco','Departamento de Saúde Mental',
+    'Hipertensão Arterial','Alimentação Escolar','PNAE','Agora Tem Especialistas',
+
+    # --- Alfabetização geral ---
+    'Alfabetização',
+    'Alfabetização na Idade Certa',
+    'Criança Alfabetizada',
+    'Meta de Alfabetização',
+    'Plano Nacional de Alfabetização',
+    'Programa Criança Alfabetizada',
+    'Idade Certa para Alfabetização',
+    'Alfabetização de Crianças',
+    'Alfabetização Inicial',
+    'Alfabetização Plena',
+    'Alfabetização em Língua Portuguesa',
+    'Analfabetismo',
+    'Erradicação do Analfabetismo',
+    'Programa Nacional de Alfabetização na Idade Certa',
+    'Pacto pela Alfabetização',
+    'Política Nacional de Alfabetização',
+    'Recomposição das Aprendizagens em Alfabetização',
+    'Competências de Alfabetização',
+    'Avaliação da Alfabetização',
+    'Saeb Alfabetização',
+
+    # --- Matemática (Educação Básica) ---
+    'Alfabetização Matemática',
+    'Analfabetismo Matemático',
+    'Aprendizagem em Matemática',
+    'Recomposição das Aprendizagens em Matemática',
+    'Recomposição de Aprendizagem',
+    'Competências Matemáticas',
+    'Proficiência em Matemática',
+    'Avaliação Diagnóstica de Matemática',
+    'Avaliação Formativa de Matemática',
+    'Política Nacional de Matemática',
+    'Saeb Matemática',
+    'Ideb Matemática',
+    'BNCC Matemática',
+    'Matemática no Ensino Fundamental',
+    'Matemática no Ensino Médio',
+    'Anos Iniciais de Matemática',
+    'Anos Finais de Matemática',
+    'OBMEP',
+    'Olimpíada Brasileira de Matemática das Escolas Públicas',
+    'Olimpíada de Matemática',
+    'PNLD Matemática'
+]
+
+_PAL_CHAVE_NORM = [(kw, _normalize(kw)) for kw in PALAVRAS_CHAVE]
+
+def _extract_keywords(texto: str) -> str:
+    """Devolve as palavras-chave encontradas (separadas por '; ')."""
+    nt = _normalize(texto)
+    achadas = []
+    for original, norm_kw in _PAL_CHAVE_NORM:
+        if norm_kw and norm_kw in nt:
+            achadas.append(original)
+    # dedup preservando ordem
+    return "; ".join(dict.fromkeys(achadas).keys())
+
 # =========================================================
 #                       SENADO
 # =========================================================
@@ -58,12 +141,12 @@ def _senado_textos_api(codigo_materia):
     tries = [
         f"https://legis.senado.leg.br/dadosabertos/materia/textos/{codigo_materia}.json",
         f"https://legis.senado.leg.br/dadosabertos/materia/{codigo_materia}/textos.json",
-        f"https://legis.senado.leg.br/dadosabertos/materia/{codigo_materia}.json",
+        f"https://legis.senado.leg.br/dadosabertos/materia/{codigo_materia}.json",  # fallback amplo
     ]
     for u in tries:
         try:
             r = requests.get(u, timeout=30, headers=HDR)
-            if r.status_code != 200:
+            if r.status_code != 200: 
                 continue
             j = r.json()
             textos = (_dig(j, ("TextoMateria","Textos","Texto"))
@@ -75,15 +158,7 @@ def _senado_textos_api(codigo_materia):
     return []
 
 def _senado_inteiro_teor_api(codigo_materia):
-    """
-    Tenta escolher o link do inteiro teor nos 'Textos' da API.
-    Retorna (url, dataTexto) ou (None, None).
-    Preferência:
-      1) 'Avulso inicial da matéria'
-      2) PDFs com descrições mais prováveis
-      3) qualquer PDF
-      4) primeiro link http
-    """
+    """Retorna (url, dataTexto) ou (None, None)."""
     textos = _senado_textos_api(codigo_materia)
     if not textos:
         return None, None
@@ -95,24 +170,27 @@ def _senado_inteiro_teor_api(codigo_materia):
         data = td.get("DataTexto") or td.get("Data")
         return desc, form, url, data
 
+    # 1) Avulso inicial
     for t in textos:
         desc, form, url, data = extract(t)
         if desc.lower() == "avulso inicial da matéria" and isinstance(url, str) and url.startswith("http"):
             return url, (str(data) if data else None)
 
     prefer = ("projeto","parecer","substitutivo","emenda","requerimento","texto")
-
+    # 2) PDFs com descrições preferidas
     for t in textos:
         desc, form, url, data = extract(t)
         if isinstance(url, str) and url.startswith("http"):
             if ("pdf" in form or url.lower().endswith(".pdf")) and any(k in desc.lower() for k in prefer):
                 return url, (str(data) if data else None)
 
+    # 3) qualquer PDF
     for t in textos:
         desc, form, url, data = extract(t)
         if isinstance(url, str) and url.startswith("http") and ("pdf" in form or url.lower().endswith(".pdf")):
             return url, (str(data) if data else None)
 
+    # 4) primeiro http
     for t in textos:
         desc, form, url, data = extract(t)
         if isinstance(url, str) and url.startswith("http"):
@@ -148,6 +226,7 @@ def _senado_inteiro_teor(codigo_materia):
     if u: return u, d
     return _senado_inteiro_teor_page(codigo_materia)
 
+# Regex para extrair (PARTIDO/UF) quando vier como string única
 _rx_autor_chunk = re.compile(r"""\s*
     (?P<nome>.+?)
     (?:\s*\(\s*(?P<partido>[A-ZÀ-Ü\-]+)\s*/\s*(?P<uf>[A-Z]{2})\s*\))?
@@ -196,8 +275,9 @@ def senado_df_hoje() -> pd.DataFrame:
         numero = _get(m, "Numero") or _get(dados, "NumeroMateria") or _get(ident, "NumeroMateria")
         ano    = _get(m, "Ano")    or _get(dados, "AnoMateria")    or _get(ident, "AnoMateria")
         data   = _get(m, "Data")   or _get(dados, "DataApresentacao") or _get(m, "DataApresentacao")
-        ementa = _get(m, "Ementa") or _get(dados, "EmentaMateria") or _get(m, "EmentaMateria")
+        ementa = (_get(m, "Ementa") or _get(dados, "EmentaMateria") or _get(m, "EmentaMateria") or "") 
 
+        # Autoria
         autor_str = _get(m, "Autor")
         nomes, partidos, ufs = [], [], []
         for bloco in ("Autoria","Autores"):
@@ -225,22 +305,23 @@ def senado_df_hoje() -> pd.DataFrame:
         it_url, _ = _senado_inteiro_teor(codigo)
 
         rows.append({
-            "uid": f"Senado:{codigo}",
-            "casa": "Senado",
-            "sigla": sigla, "numero": numero, "ano": ano,
-            "data_apresentacao": (pd.to_datetime(data, errors="coerce").strftime("%Y-%m-%d") if data else ""),
-            "ementa": ementa or "",
-            "autor": autor_str or "",
-            "autor_partidos": ", ".join([p for p in partidos if p]) if any(partidos) else "",
-            "autor_ufs": ", ".join([u for u in ufs if u]) if any(ufs) else "",
-            "linkPagina": f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo}",
-            "inteiro_teor_url": it_url or "",
-            "ingest_at": now_br().strftime("%Y-%m-%d %H:%M:%S"),
+            "UID": f"Senado:{codigo}",
+            "Casa Atual": "Senado",
+            "Sigla": sigla, "Número": numero, "Ano": ano,
+            "Data Apresentação": (pd.to_datetime(data, errors="coerce").strftime("%Y-%m-%d") if data else ""),
+            "Ementa": ementa,
+            "Palavras Chave": _extract_keywords(ementa),
+            "Autor": autor_str or "",
+            "Autor Partidos": ", ".join([p for p in partidos if p]) if any(partidos) else "",
+            "Autor UFs": ", ".join([u for u in ufs if u]) if any(ufs) else "",
+            "Link Página": f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo}",
+            "Inteiro Teor URL": it_url or "",
+            "Ingest At": now_br().strftime("%Y-%m-%d %H:%M:%S"),
         })
 
     df = pd.DataFrame(rows)
     if not df.empty:
-        df = df.sort_values(["data_apresentacao","uid"], ascending=[False, False]).reset_index(drop=True)
+        df = df.sort_values(["Data Apresentação","UID"], ascending=[False, False]).reset_index(drop=True)
     return df
 
 # =========================================================
@@ -296,6 +377,7 @@ def _autores_camara_completo(prop_id:int) -> dict:
     }
 
 def _camara_inteiro_teor(prop_id:int):
+    # 1) campo urlInteiroTeor do detalhe
     try:
         r = requests.get(f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{prop_id}",
                          timeout=30, headers=HDR)
@@ -303,9 +385,10 @@ def _camara_inteiro_teor(prop_id:int):
             dados = r.json().get("dados", {})
             u = dados.get("urlInteiroTeor")
             if isinstance(u, str) and u.startswith("http"):
-                return u, ""
+                return u, ""  # detalhe não dá data separada
     except Exception:
         pass
+    # 2) /inteiroTeor
     try:
         r = requests.get(f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{prop_id}/inteiroTeor",
                          timeout=30, headers=HDR)
@@ -317,11 +400,13 @@ def _camara_inteiro_teor(prop_id:int):
                     return u, (str(dt)[:19] if dt else "")
     except Exception:
         pass
+    # 3) /documentos
     try:
         r = requests.get(f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{prop_id}/documentos",
                          timeout=30, headers=HDR)
         if r.status_code == 200:
             docs = _as_list(r.json().get("dados", []))
+            # preferir "inteiro teor"
             for d in docs:
                 desc = (d.get("tipoDescricao") or d.get("titulo") or "").lower()
                 u = d.get("url") or d.get("uri") or d.get("link")
@@ -362,20 +447,23 @@ def camara_df_hoje() -> pd.DataFrame:
             autores = _autores_camara_completo(pid)
             it_url, _ = _camara_inteiro_teor(pid)
 
+            ementa = d.get("ementa", "") or ""
+
             rows.append({
-                "uid": f"Camara:{pid}",
-                "casa": "Camara",
-                "sigla": d.get("siglaTipo"),
-                "numero": d.get("numero"),
-                "ano": d.get("ano"),
-                "data_apresentacao": data or "",
-                "ementa": d.get("ementa"),
-                "autor": autores.get("autor",""),
-                "autor_partidos": autores.get("autor_partidos",""),
-                "autor_ufs": autores.get("autor_ufs",""),
-                "linkPagina": f"https://www.camara.leg.br/propostas-legislativas/{pid}",
-                "inteiro_teor_url": it_url or "",
-                "ingest_at": now_br().strftime("%Y-%m-%d %H:%M:%S"),
+                "UID": f"Camara:{pid}",
+                "Casa Atual": "Camara",
+                "Sigla": d.get("siglaTipo"),
+                "Número": d.get("numero"),
+                "Ano": d.get("ano"),
+                "Data Apresentação": data or "",
+                "Ementa": ementa,
+                "Palavras Chave": _extract_keywords(ementa),
+                "Autor": autores.get("autor",""),
+                "Autor Partidos": autores.get("autor_partidos",""),
+                "Autor UFs": autores.get("autor_ufs",""),
+                "Link Página": f"https://www.camara.leg.br/propostas-legislativas/{pid}",
+                "Inteiro Teor URL": it_url or "",
+                "Ingest At": now_br().strftime("%Y-%m-%d %H:%M:%S"),
             })
         next_link = next((lk for lk in j.get("links", []) if lk.get("rel")=="next"), None)
         if not next_link: break
@@ -384,7 +472,7 @@ def camara_df_hoje() -> pd.DataFrame:
 
     df = pd.DataFrame(rows)
     if not df.empty:
-        df = df.sort_values(["data_apresentacao","uid"], ascending=[False, False]).reset_index(drop=True)
+        df = df.sort_values(["Data Apresentação","UID"], ascending=[False, False]).reset_index(drop=True)
     return df
 
 # =========================================================
@@ -396,15 +484,16 @@ SHEET_CAMARA   = os.environ.get("SHEET_CAMARA", "Camara")
 CREDENTIALS_JSON = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "credentials.json")
 
 NEEDED_COLUMNS = [
-    "uid","casa",
-    "sigla","numero","ano",
-    "data_apresentacao","ementa",
-    "autor","autor_partidos","autor_ufs",
-    "linkPagina","inteiro_teor_url",
-    "ingest_at",
+    "UID","Casa Atual",
+    "Sigla","Número","Ano",
+    "Data Apresentação","Ementa","Palavras Chave",
+    "Autor","Autor Partidos","Autor UFs",
+    "Link Página","Inteiro Teor URL",
+    "Ingest At",
 ]
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    # garantir que todas existam
     for col in NEEDED_COLUMNS:
         if col not in df.columns:
             df[col] = ""
@@ -441,8 +530,8 @@ def append_dedupe(df: pd.DataFrame, sheet_name: str):
     try:
         ws = sh.worksheet(sheet_name)
         _ensure_header(ws, NEEDED_COLUMNS)
-        existing = set(ws.col_values(1)[1:])  # uids existentes (ignora header)
-        new_df = df[~df["uid"].isin(existing)].copy()
+        existing = set(ws.col_values(1)[1:])  # UIDs existentes (ignora header)
+        new_df = df[~df["UID"].isin(existing)].copy()
         if new_df.empty:
             print(f"[{sheet_name}] nada novo para anexar.")
             return
