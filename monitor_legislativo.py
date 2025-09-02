@@ -1,5 +1,5 @@
 # monitor_legislativo.py
-import os, re, time, json, requests, pandas as pd
+import os, re, time, requests, pandas as pd
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -53,72 +53,101 @@ def _last_int_from_uri(u: str|None):
 from bs4 import BeautifulSoup
 BASE_PESQUISA_SF = "https://legis.senado.leg.br/dadosabertos/materia/pesquisa/lista.json"
 
-def _senado_inteiro_teor_url_from_api(codigo_materia: int|str):
+def _senado_textos_api(codigo_materia):
+    """Retorna lista de dicts de textos da matéria (ou [])."""
     tries = [
         f"https://legis.senado.leg.br/dadosabertos/materia/textos/{codigo_materia}.json",
         f"https://legis.senado.leg.br/dadosabertos/materia/{codigo_materia}/textos.json",
+        f"https://legis.senado.leg.br/dadosabertos/materia/{codigo_materia}.json",
     ]
     for u in tries:
-        r = requests.get(u, timeout=30, headers=HDR)
-        if r.status_code != 200: continue
-        j = r.json()
-        textos = (_dig(j, ("TextoMateria","Textos","Texto"))
-                  or _dig(j, ("Textos","Texto"))
-                  or j.get("Textos") or [])
-        textos = _as_list(textos)
+        try:
+            r = requests.get(u, timeout=30, headers=HDR)
+            if r.status_code != 200:
+                continue
+            j = r.json()
+            textos = (_dig(j, ("TextoMateria","Textos","Texto"))
+                      or _dig(j, ("Textos","Texto"))
+                      or j.get("Textos") or [])
+            return _as_list(textos)
+        except Exception:
+            pass
+    return []
 
-        # 1) Avulso inicial da matéria
-        for t in textos:
-            desc = (t.get("DescricaoTipoTexto") or "").strip().lower()
-            link = t.get("UrlTexto") or t.get("Url") or t.get("Link")
-            if "avulso inicial da matéria" == desc and isinstance(link, str) and link.startswith("http"):
-                return link
+def _senado_inteiro_teor_api(codigo_materia):
+    """
+    Tenta escolher o link do inteiro teor nos 'Textos' da API.
+    Retorna (url, dataTexto) ou (None, None).
+    Preferência:
+      1) 'Avulso inicial da matéria'
+      2) PDFs com descrições mais prováveis
+      3) qualquer PDF
+      4) primeiro link http
+    """
+    textos = _senado_textos_api(codigo_materia)
+    if not textos:
+        return None, None
 
-        # 2) PDFs relevantes
-        prefer = ("projeto","parecer","substitutivo","emenda","requerimento","texto")
-        for t in textos:
-            desc = (t.get("DescricaoTipoTexto") or "").lower()
-            fmt  = (t.get("FormatoTexto") or t.get("TipoDocumento") or "").lower()
-            link = t.get("UrlTexto") or t.get("Url") or t.get("Link")
-            if isinstance(link, str) and link.startswith("http") and ("pdf" in fmt or link.lower().endswith(".pdf")):
-                if any(k in desc for k in prefer):
-                    return link
+    def extract(td):
+        desc = (td.get("DescricaoTipoTexto") or "").strip()
+        form = (td.get("FormatoTexto") or td.get("TipoDocumento") or "").lower()
+        url  = td.get("UrlTexto") or td.get("Url") or td.get("Link")
+        data = td.get("DataTexto") or td.get("Data")
+        return desc, form, url, data
 
-        # 3) qualquer PDF
-        for t in textos:
-            fmt  = (t.get("FormatoTexto") or t.get("TipoDocumento") or "").lower()
-            link = t.get("UrlTexto") or t.get("Url") or t.get("Link")
-            if isinstance(link, str) and link.startswith("http") and ("pdf" in fmt or link.lower().endswith(".pdf")):
-                return link
+    for t in textos:
+        desc, form, url, data = extract(t)
+        if desc.lower() == "avulso inicial da matéria" and isinstance(url, str) and url.startswith("http"):
+            return url, (str(data) if data else None)
 
-        # 4) primeiro válido
-        for t in textos:
-            link = t.get("UrlTexto") or t.get("Url") or t.get("Link")
-            if isinstance(link, str) and link.startswith("http"):
-                return link
-    return None
+    prefer = ("projeto","parecer","substitutivo","emenda","requerimento","texto")
 
-def _senado_inteiro_teor_url_from_page(codigo_materia: int|str):
+    for t in textos:
+        desc, form, url, data = extract(t)
+        if isinstance(url, str) and url.startswith("http"):
+            if ("pdf" in form or url.lower().endswith(".pdf")) and any(k in desc.lower() for k in prefer):
+                return url, (str(data) if data else None)
+
+    for t in textos:
+        desc, form, url, data = extract(t)
+        if isinstance(url, str) and url.startswith("http") and ("pdf" in form or url.lower().endswith(".pdf")):
+            return url, (str(data) if data else None)
+
+    for t in textos:
+        desc, form, url, data = extract(t)
+        if isinstance(url, str) and url.startswith("http"):
+            return url, (str(data) if data else None)
+
+    return None, None
+
+def _senado_inteiro_teor_page(codigo_materia):
+    """Fallback pela página pública. Retorna (url, None)."""
     page = f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo_materia}"
-    r = requests.get(page, timeout=40, headers=HDR)
-    if r.status_code != 200: return None
-    soup = BeautifulSoup(r.text, "html.parser")
+    try:
+        r = requests.get(page, timeout=40, headers=HDR)
+        if r.status_code != 200:
+            return None, None
+        soup = BeautifulSoup(r.text, "html.parser")
 
-    def pick_first(anchors):
-        for a in anchors:
-            href = (a.get("href") or "").strip()
-            if href.startswith("http") and ("sdleg-getter/documento" in href or href.lower().endswith(".pdf")):
-                return href
-        return None
+        def pick_first(anchors):
+            for a in anchors:
+                href = (a.get("href") or "").strip()
+                if href.startswith("http") and ("sdleg-getter/documento" in href or href.lower().endswith(".pdf")):
+                    return href
+            return None
 
-    anchors = soup.select("a.sf-texto-materia--link")
-    avulso = [a for a in anchors if "avulso inicial da matéria" in (a.get("title") or a.get_text("") or "").lower()]
-    return pick_first(avulso) or pick_first(anchors) or pick_first(soup.find_all("a"))
+        anchors = soup.select("a.sf-texto-materia--link")
+        avulso = [a for a in anchors if "avulso inicial da matéria" in (a.get("title") or a.get_text("") or "").lower()]
+        u = pick_first(avulso) or pick_first(anchors) or pick_first(soup.find_all("a"))
+        return (u, None) if u else (None, None)
+    except Exception:
+        return None, None
 
-def _senado_inteiro_teor_url(codigo_materia: int|str):
-    return _senado_inteiro_teor_url_from_api(codigo_materia) or _senado_inteiro_teor_url_from_page(codigo_materia)
+def _senado_inteiro_teor(codigo_materia):
+    u, d = _senado_inteiro_teor_api(codigo_materia)
+    if u: return u, d
+    return _senado_inteiro_teor_page(codigo_materia)
 
-# Regex para extrair (PARTIDO/UF) quando vier como string única
 _rx_autor_chunk = re.compile(r"""\s*
     (?P<nome>.+?)
     (?:\s*\(\s*(?P<partido>[A-ZÀ-Ü\-]+)\s*/\s*(?P<uf>[A-Z]{2})\s*\))?
@@ -169,7 +198,6 @@ def senado_df_hoje() -> pd.DataFrame:
         data   = _get(m, "Data")   or _get(dados, "DataApresentacao") or _get(m, "DataApresentacao")
         ementa = _get(m, "Ementa") or _get(dados, "EmentaMateria") or _get(m, "EmentaMateria")
 
-        # Autoria estruturada ou texto
         autor_str = _get(m, "Autor")
         nomes, partidos, ufs = [], [], []
         for bloco in ("Autoria","Autores"):
@@ -194,24 +222,25 @@ def senado_df_hoje() -> pd.DataFrame:
         if not autor_str and nomes:
             autor_str = ", ".join(nomes)
 
-        inteiro = _senado_inteiro_teor_url(codigo)
+        it_url, _ = _senado_inteiro_teor(codigo)
+
         rows.append({
             "uid": f"Senado:{codigo}",
             "casa": "Senado",
-            "codigo": codigo, "sigla": sigla, "numero": numero, "ano": ano,
+            "sigla": sigla, "numero": numero, "ano": ano,
             "data_apresentacao": (pd.to_datetime(data, errors="coerce").strftime("%Y-%m-%d") if data else ""),
-            "ementa": ementa,
+            "ementa": ementa or "",
             "autor": autor_str or "",
             "autor_partidos": ", ".join([p for p in partidos if p]) if any(partidos) else "",
             "autor_ufs": ", ".join([u for u in ufs if u]) if any(ufs) else "",
             "linkPagina": f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo}",
-            "inteiro_teor_url": inteiro or "",
+            "inteiro_teor_url": it_url or "",
             "ingest_at": now_br().strftime("%Y-%m-%d %H:%M:%S"),
         })
 
     df = pd.DataFrame(rows)
     if not df.empty:
-        df = df.sort_values(["data_apresentacao","codigo"], ascending=[False, False]).reset_index(drop=True)
+        df = df.sort_values(["data_apresentacao","uid"], ascending=[False, False]).reset_index(drop=True)
     return df
 
 # =========================================================
@@ -245,7 +274,6 @@ def _get_deputado_partido_uf(dep_id: int):
         return (None, None)
 
 def _autores_camara_completo(prop_id:int) -> dict:
-    """Retorna dict com autor, autor_partidos, autor_ufs agregados via /autores + /deputados/{id}"""
     out_nomes, out_partidos, out_ufs = [], [], []
     url = f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{prop_id}/autores"
     try:
@@ -267,8 +295,7 @@ def _autores_camara_completo(prop_id:int) -> dict:
         "autor_ufs": ", ".join([u for u in out_ufs if u]) if any(out_ufs) else "",
     }
 
-def _camara_inteiro_teor_url(prop_id:int):
-    # A) urlInteiroTeor
+def _camara_inteiro_teor(prop_id:int):
     try:
         r = requests.get(f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{prop_id}",
                          timeout=30, headers=HDR)
@@ -276,21 +303,20 @@ def _camara_inteiro_teor_url(prop_id:int):
             dados = r.json().get("dados", {})
             u = dados.get("urlInteiroTeor")
             if isinstance(u, str) and u.startswith("http"):
-                return u
+                return u, ""
     except Exception:
         pass
-    # B) /inteiroTeor
     try:
         r = requests.get(f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{prop_id}/inteiroTeor",
                          timeout=30, headers=HDR)
         if r.status_code == 200:
             for d in _as_list(r.json().get("dados", [])):
                 u = d.get("url") or d.get("uri") or d.get("link")
+                dt = d.get("dataHora") or d.get("data")
                 if isinstance(u, str) and u.startswith("http"):
-                    return u
+                    return u, (str(dt)[:19] if dt else "")
     except Exception:
         pass
-    # C) /documentos
     try:
         r = requests.get(f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{prop_id}/documentos",
                          timeout=30, headers=HDR)
@@ -299,15 +325,17 @@ def _camara_inteiro_teor_url(prop_id:int):
             for d in docs:
                 desc = (d.get("tipoDescricao") or d.get("titulo") or "").lower()
                 u = d.get("url") or d.get("uri") or d.get("link")
-                if isinstance(u, str) and u.startswith("http"):
-                    if "inteiro" in desc or "teor" in desc or u.lower().endswith(".pdf"):
-                        return u
+                dt = d.get("dataHora") or d.get("data")
+                if isinstance(u, str) and u.startswith("http") and ("inteiro" in desc or "teor" in desc or u.lower().endswith(".pdf")):
+                    return u, (str(dt)[:19] if dt else "")
             for d in docs:
                 u = d.get("url") or d.get("uri") or d.get("link")
-                if isinstance(u, str) and u.startswith("http"): return u
+                dt = d.get("dataHora") or d.get("data")
+                if isinstance(u, str) and u.startswith("http"):
+                    return u, (str(dt)[:19] if dt else "")
     except Exception:
         pass
-    return None
+    return None, None
 
 def camara_df_hoje() -> pd.DataFrame:
     params = {"dataApresentacaoInicio": today_iso(),
@@ -321,7 +349,6 @@ def camara_df_hoje() -> pd.DataFrame:
             pid = d.get("id")
             data = _parse_data_apresentacao_camara_text(d.get("dataApresentacao"))
             if data is None:
-                # fallback: detalhe
                 try:
                     r2 = requests.get(f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{pid}",
                                       timeout=20, headers=HDR)
@@ -332,21 +359,22 @@ def camara_df_hoje() -> pd.DataFrame:
                 except Exception:
                     pass
 
-            # autores completos
-            det_aut = _autores_camara_completo(pid)
+            autores = _autores_camara_completo(pid)
+            it_url, _ = _camara_inteiro_teor(pid)
 
             rows.append({
                 "uid": f"Camara:{pid}",
-                "casa":"Camara",
-                "id": pid, "sigla": d.get("siglaTipo"),
-                "numero": d.get("numero"), "ano": d.get("ano"),
+                "casa": "Camara",
+                "sigla": d.get("siglaTipo"),
+                "numero": d.get("numero"),
+                "ano": d.get("ano"),
                 "data_apresentacao": data or "",
                 "ementa": d.get("ementa"),
-                "autor": det_aut.get("autor",""),
-                "autor_partidos": det_aut.get("autor_partidos",""),
-                "autor_ufs": det_aut.get("autor_ufs",""),
+                "autor": autores.get("autor",""),
+                "autor_partidos": autores.get("autor_partidos",""),
+                "autor_ufs": autores.get("autor_ufs",""),
                 "linkPagina": f"https://www.camara.leg.br/propostas-legislativas/{pid}",
-                "inteiro_teor_url": _camara_inteiro_teor_url(pid) or "",
+                "inteiro_teor_url": it_url or "",
                 "ingest_at": now_br().strftime("%Y-%m-%d %H:%M:%S"),
             })
         next_link = next((lk for lk in j.get("links", []) if lk.get("rel")=="next"), None)
@@ -356,7 +384,7 @@ def camara_df_hoje() -> pd.DataFrame:
 
     df = pd.DataFrame(rows)
     if not df.empty:
-        df = df.sort_values(["data_apresentacao","id"], ascending=[False, False]).reset_index(drop=True)
+        df = df.sort_values(["data_apresentacao","uid"], ascending=[False, False]).reset_index(drop=True)
     return df
 
 # =========================================================
@@ -369,39 +397,31 @@ CREDENTIALS_JSON = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "credentials
 
 NEEDED_COLUMNS = [
     "uid","casa",
-    # Identificadores
-    "codigo","id","sigla","numero","ano",
-    # Datas/ementa
+    "sigla","numero","ano",
     "data_apresentacao","ementa",
-    # Autoria
     "autor","autor_partidos","autor_ufs",
-    # Links + controle
-    "linkPagina","inteiro_teor_url","ingest_at",
+    "linkPagina","inteiro_teor_url",
+    "ingest_at",
 ]
 
-def _normalize_columns(df: pd.DataFrame, casa: str) -> pd.DataFrame:
-    """Garante que todas as colunas existam (preenchendo vazio) e como string."""
+def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     for col in NEEDED_COLUMNS:
         if col not in df.columns:
             df[col] = ""
-    # Zera colunas que não se aplicam a cada casa
-    if casa == "Senado":
-        df["id"] = ""      # Senado não tem 'id'
-    else:
-        df["codigo"] = ""  # Câmara não tem 'codigo'
-    # Tudo como string para o Sheets
     for c in NEEDED_COLUMNS:
         df[c] = df[c].fillna("").astype(str)
     return df[NEEDED_COLUMNS].copy()
 
+def _ensure_header(ws, header):
+    """Se a aba existir mas estiver sem header (ou diferente), escreve o header."""
+    first_row = ws.row_values(1)
+    if first_row != header:
+        ws.resize(rows=max(2, ws.row_count), cols=len(header))
+        ws.update('1:1', [header])
+
 def append_dedupe(df: pd.DataFrame, sheet_name: str):
-    """
-    Lê UIDs existentes (coluna A), filtra apenas novos e faz append.
-    Cria a aba com header se não existir.
-    """
     import gspread
     from google.oauth2.service_account import Credentials
-    from gspread_dataframe import set_with_dataframe
 
     if df is None or df.empty:
         print(f"[{sheet_name}] nenhum dado para enviar.")
@@ -416,41 +436,42 @@ def append_dedupe(df: pd.DataFrame, sheet_name: str):
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(SPREADSHEET_ID)
 
-    casa = "Senado" if sheet_name.lower().startswith("sen") else "Camara"
-    df = _normalize_columns(df, casa)
+    df = _normalize_columns(df)
 
-    # Abre ou cria worksheet
     try:
         ws = sh.worksheet(sheet_name)
+        _ensure_header(ws, NEEDED_COLUMNS)
         existing = set(ws.col_values(1)[1:])  # uids existentes (ignora header)
         new_df = df[~df["uid"].isin(existing)].copy()
         if new_df.empty:
             print(f"[{sheet_name}] nada novo para anexar.")
             return
-        # Append só dos valores (sem header)
         ws.append_rows(new_df.values.tolist(), value_input_option="RAW")
         print(f"[{sheet_name}] adicionadas {len(new_df)} linhas novas.")
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=sheet_name, rows="100", cols=str(len(NEEDED_COLUMNS)+2))
-        set_with_dataframe(ws, df, include_index=False, include_column_header=True, resize=True)
+        ws = sh.add_worksheet(title=sheet_name, rows=str(max(100, len(df)+10)), cols=len(NEEDED_COLUMNS))
+        _ensure_header(ws, NEEDED_COLUMNS)
+        if not df.empty:
+            ws.append_rows(df.values.tolist(), value_input_option="RAW")
         print(f"[{sheet_name}] criada e preenchida com {len(df)} linhas.")
 
+# =========================================================
+#                        MAIN
+# =========================================================
 def main():
-    # Coleta
     senado = senado_df_hoje()
     camara = camara_df_hoje()
 
     print(f"Senado: {len(senado)} linhas | Câmara: {len(camara)} linhas")
 
-    # Modo local (debug) caso não haja planilha configurada
     if not SPREADSHEET_ID:
+        # modo local (debug): salva CSVs
         stamp = today_compact()
-        senado.to_csv(f"senado_todas_{stamp}.csv", index=False)
-        camara.to_csv(f"camara_todas_{stamp}.csv", index=False)
-        print("SPREADSHEET_ID não definido; arquivos CSV locais foram salvos.")
+        senado.to_csv(f"senado_{stamp}.csv", index=False)
+        camara.to_csv(f"camara_{stamp}.csv", index=False)
+        print("SPREADSHEET_ID não definido; arquivos CSV salvos.")
         return
 
-    # Append deduplicado
     append_dedupe(senado, SHEET_SENADO)
     append_dedupe(camara, SHEET_CAMARA)
 
