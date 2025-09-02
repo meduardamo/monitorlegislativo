@@ -1,11 +1,12 @@
-import os, re, time, requests, pandas as pd
+# monitor_legislativo.py
+import os, re, time, json, requests, pandas as pd
 from datetime import datetime
 from urllib.parse import urlparse
 
-# ---------- Timezone BR ----------
+# ====================== Timezone BR ======================
 try:
     from zoneinfo import ZoneInfo
-except Exception:
+except Exception:  # py<3.9
     from backports.zoneinfo import ZoneInfo  # type: ignore
 
 TZ_BR = ZoneInfo("America/Sao_Paulo")
@@ -13,10 +14,11 @@ now_br = lambda: datetime.now(TZ_BR)
 today_iso = lambda: now_br().date().strftime("%Y-%m-%d")
 today_compact = lambda: now_br().date().strftime("%Y%m%d")
 
-# ---------- HTTP ----------
+# ====================== HTTP ======================
 HDR = {
-    "Accept":"application/json,text/html,*/*",
-    "User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
+    "Accept": "application/json,text/html,*/*",
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/126 Safari/537.36"
 }
 
 def _as_list(x):
@@ -32,7 +34,22 @@ def _dig(d: dict, path, default=None):
             return default
     return cur
 
-# ====================== SENADO ======================
+def _get(d: dict, *keys, default=None):
+    for k in keys:
+        if isinstance(d, dict) and k in d:
+            return d[k]
+    return default
+
+def _last_int_from_uri(u: str|None):
+    if not u: return None
+    try:
+        return int(urlparse(u).path.rstrip("/").split("/")[-1])
+    except Exception:
+        return None
+
+# =========================================================
+#                       SENADO
+# =========================================================
 from bs4 import BeautifulSoup
 BASE_PESQUISA_SF = "https://legis.senado.leg.br/dadosabertos/materia/pesquisa/lista.json"
 
@@ -50,13 +67,14 @@ def _senado_inteiro_teor_url_from_api(codigo_materia: int|str):
                   or j.get("Textos") or [])
         textos = _as_list(textos)
 
-        # Avulso inicial da matéria
+        # 1) Avulso inicial da matéria
         for t in textos:
             desc = (t.get("DescricaoTipoTexto") or "").strip().lower()
             link = t.get("UrlTexto") or t.get("Url") or t.get("Link")
             if "avulso inicial da matéria" == desc and isinstance(link, str) and link.startswith("http"):
                 return link
-        # PDFs relevantes
+
+        # 2) PDFs relevantes
         prefer = ("projeto","parecer","substitutivo","emenda","requerimento","texto")
         for t in textos:
             desc = (t.get("DescricaoTipoTexto") or "").lower()
@@ -65,13 +83,15 @@ def _senado_inteiro_teor_url_from_api(codigo_materia: int|str):
             if isinstance(link, str) and link.startswith("http") and ("pdf" in fmt or link.lower().endswith(".pdf")):
                 if any(k in desc for k in prefer):
                     return link
-        # qualquer PDF
+
+        # 3) qualquer PDF
         for t in textos:
             fmt  = (t.get("FormatoTexto") or t.get("TipoDocumento") or "").lower()
             link = t.get("UrlTexto") or t.get("Url") or t.get("Link")
             if isinstance(link, str) and link.startswith("http") and ("pdf" in fmt or link.lower().endswith(".pdf")):
                 return link
-        # primeiro válido
+
+        # 4) primeiro válido
         for t in textos:
             link = t.get("UrlTexto") or t.get("Url") or t.get("Link")
             if isinstance(link, str) and link.startswith("http"):
@@ -98,6 +118,33 @@ def _senado_inteiro_teor_url_from_page(codigo_materia: int|str):
 def _senado_inteiro_teor_url(codigo_materia: int|str):
     return _senado_inteiro_teor_url_from_api(codigo_materia) or _senado_inteiro_teor_url_from_page(codigo_materia)
 
+# Regex para extrair (PARTIDO/UF) quando vier como string única
+_rx_autor_chunk = re.compile(r"""\s*
+    (?P<nome>.+?)
+    (?:\s*\(\s*(?P<partido>[A-ZÀ-Ü\-]+)\s*/\s*(?P<uf>[A-Z]{2})\s*\))?
+    \s*$""", re.X)
+
+def _parse_autores_senado_texto(autor_str: str):
+    if not autor_str:
+        return [], [], []
+    chunks = [c.strip() for c in re.split(r";", autor_str) if c and c.strip()]
+    if len(chunks) == 1:
+        if '), ' in autor_str:
+            parts = [p + (')' if not p.endswith(')') else '') for p in autor_str.split('), ')]
+            chunks = [p.strip() for p in parts]
+        else:
+            chunks = [c.strip() for c in autor_str.split(',') if c.strip()]
+    nomes, partidos, ufs = [], [], []
+    for ch in chunks:
+        m = _rx_autor_chunk.match(ch)
+        if m:
+            nomes.append(m.group('nome'))
+            partidos.append(m.group('partido'))
+            ufs.append(m.group('uf'))
+        else:
+            nomes.append(ch); partidos.append(None); ufs.append(None)
+    return nomes, partidos, ufs
+
 def senado_df_hoje() -> pd.DataFrame:
     params = {"dataInicioApresentacao": today_compact(), "dataFimApresentacao": today_compact()}
     r = requests.get(BASE_PESQUISA_SF, params=params, timeout=60, headers=HDR); r.raise_for_status()
@@ -111,22 +158,52 @@ def senado_df_hoje() -> pd.DataFrame:
     rows = []
     for m in materias:
         if not isinstance(m, dict): continue
-        dados = m.get("DadosBasicosMateria") if isinstance(m.get("DadosBasicosMateria"), dict) else {}
-        ident = m.get("IdentificacaoMateria") if isinstance(m.get("IdentificacaoMateria"), dict) else {}
-        codigo = (m.get("Codigo") or (ident or {}).get("CodigoMateria"))
-        sigla  = (m.get("Sigla") or (dados or {}).get("SiglaSubtipoMateria") or (dados or {}).get("SiglaMateria")
-                  or (ident or {}).get("SiglaSubtipoMateria") or (ident or {}).get("SiglaMateria"))
-        numero = (m.get("Numero") or (dados or {}).get("NumeroMateria") or (ident or {}).get("NumeroMateria"))
-        ano    = (m.get("Ano")    or (dados or {}).get("AnoMateria")    or (ident or {}).get("AnoMateria"))
-        data   = (m.get("Data")   or (dados or {}).get("DataApresentacao") or m.get("DataApresentacao"))
-        ementa = (m.get("Ementa") or (dados or {}).get("EmentaMateria") or m.get("EmentaMateria"))
+        dados = m.get("DadosBasicosMateria", {}) if isinstance(m.get("DadosBasicosMateria"), dict) else {}
+        ident = m.get("IdentificacaoMateria", {}) if isinstance(m.get("IdentificacaoMateria"), dict) else {}
+
+        codigo = _get(m, "Codigo") or _get(ident, "CodigoMateria")
+        sigla  = (_get(m, "Sigla") or _get(dados, "SiglaSubtipoMateria", "SiglaMateria")
+                  or _get(ident, "SiglaSubtipoMateria", "SiglaMateria"))
+        numero = _get(m, "Numero") or _get(dados, "NumeroMateria") or _get(ident, "NumeroMateria")
+        ano    = _get(m, "Ano")    or _get(dados, "AnoMateria")    or _get(ident, "AnoMateria")
+        data   = _get(m, "Data")   or _get(dados, "DataApresentacao") or _get(m, "DataApresentacao")
+        ementa = _get(m, "Ementa") or _get(dados, "EmentaMateria") or _get(m, "EmentaMateria")
+
+        # Autoria estruturada ou texto
+        autor_str = _get(m, "Autor")
+        nomes, partidos, ufs = [], [], []
+        for bloco in ("Autoria","Autores"):
+            b = m.get(bloco)
+            if isinstance(b, dict):
+                alist = b.get("Autor")
+                alist = alist if isinstance(alist, list) else [alist]
+                for a in alist or []:
+                    if not isinstance(a, dict): continue
+                    nome = a.get("NomeAutor") or a.get("NomeParlamentar")
+                    partido = (a.get("SiglaPartidoAutor") or a.get("SiglaPartido") or
+                               a.get("PartidoAutor") or a.get("Partido"))
+                    uf = a.get("UfAutor") or a.get("SiglaUF") or a.get("UF")
+                    if nome: nomes.append(nome)
+                    partidos.append(partido if partido else None)
+                    ufs.append(uf if uf else None)
+        if (not any(partidos) or not any(ufs)) and autor_str:
+            n2, p2, u2 = _parse_autores_senado_texto(autor_str)
+            if n2 and not nomes: nomes = n2
+            if not any(partidos): partidos = p2
+            if not any(ufs): ufs = u2
+        if not autor_str and nomes:
+            autor_str = ", ".join(nomes)
 
         inteiro = _senado_inteiro_teor_url(codigo)
         rows.append({
             "uid": f"Senado:{codigo}",
-            "casa":"Senado","codigo":codigo,"sigla":sigla,"numero":numero,"ano":ano,
-            "data_apresentacao": pd.to_datetime(data, errors="coerce").strftime("%Y-%m-%d") if data else "",
-            "ementa":ementa,
+            "casa": "Senado",
+            "codigo": codigo, "sigla": sigla, "numero": numero, "ano": ano,
+            "data_apresentacao": (pd.to_datetime(data, errors="coerce").strftime("%Y-%m-%d") if data else ""),
+            "ementa": ementa,
+            "autor": autor_str or "",
+            "autor_partidos": ", ".join([p for p in partidos if p]) if any(partidos) else "",
+            "autor_ufs": ", ".join([u for u in ufs if u]) if any(ufs) else "",
             "linkPagina": f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo}",
             "inteiro_teor_url": inteiro or "",
             "ingest_at": now_br().strftime("%Y-%m-%d %H:%M:%S"),
@@ -137,8 +214,11 @@ def senado_df_hoje() -> pd.DataFrame:
         df = df.sort_values(["data_apresentacao","codigo"], ascending=[False, False]).reset_index(drop=True)
     return df
 
-# ====================== CÂMARA ======================
+# =========================================================
+#                       CÂMARA
+# =========================================================
 BASE_CAMARA = "https://dadosabertos.camara.leg.br/api/v2/proposicoes"
+BASE_DEP    = "https://dadosabertos.camara.leg.br/api/v2/deputados"
 
 def _parse_data_apresentacao_camara_text(v: str | None) -> str | None:
     if not v: return None
@@ -150,6 +230,42 @@ def _parse_data_apresentacao_camara_text(v: str | None) -> str | None:
         return ts.strftime("%Y-%m-%d")
     except Exception:
         return None
+
+def _get_deputado_partido_uf(dep_id: int):
+    if not dep_id: return (None, None)
+    try:
+        r = requests.get(f"{BASE_DEP}/{dep_id}", timeout=25, headers=HDR)
+        r.raise_for_status()
+        dados = r.json().get("dados", {})
+        status = dados.get("ultimoStatus", {}) if isinstance(dados.get("ultimoStatus"), dict) else {}
+        partido = status.get("siglaPartido") or dados.get("siglaPartido")
+        uf = status.get("siglaUf") or dados.get("uf")
+        return partido, uf
+    except Exception:
+        return (None, None)
+
+def _autores_camara_completo(prop_id:int) -> dict:
+    """Retorna dict com autor, autor_partidos, autor_ufs agregados via /autores + /deputados/{id}"""
+    out_nomes, out_partidos, out_ufs = [], [], []
+    url = f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{prop_id}/autores"
+    try:
+        r = requests.get(url, timeout=30, headers=HDR)
+        r.raise_for_status()
+        for a in r.json().get("dados", []):
+            nome = a.get("nome")
+            uri  = a.get("uri")
+            dep_id = _last_int_from_uri(uri) if uri and "/deputados/" in uri else None
+            partido, uf = _get_deputado_partido_uf(dep_id) if dep_id else (None, None)
+            if nome: out_nomes.append(nome)
+            out_partidos.append(partido)
+            out_ufs.append(uf)
+    except Exception:
+        pass
+    return {
+        "autor": ", ".join(out_nomes) if out_nomes else "",
+        "autor_partidos": ", ".join([p for p in out_partidos if p]) if any(out_partidos) else "",
+        "autor_ufs": ", ".join([u for u in out_ufs if u]) if any(out_ufs) else "",
+    }
 
 def _camara_inteiro_teor_url(prop_id:int):
     # A) urlInteiroTeor
@@ -170,7 +286,8 @@ def _camara_inteiro_teor_url(prop_id:int):
         if r.status_code == 200:
             for d in _as_list(r.json().get("dados", [])):
                 u = d.get("url") or d.get("uri") or d.get("link")
-                if isinstance(u, str) and u.startswith("http"): return u
+                if isinstance(u, str) and u.startswith("http"):
+                    return u
     except Exception:
         pass
     # C) /documentos
@@ -214,13 +331,21 @@ def camara_df_hoje() -> pd.DataFrame:
                                 or _parse_data_apresentacao_camara_text((det.get("statusProposicao") or {}).get("dataHora")))
                 except Exception:
                     pass
+
+            # autores completos
+            det_aut = _autores_camara_completo(pid)
+
             rows.append({
                 "uid": f"Camara:{pid}",
-                "casa":"Camara","id":pid,"sigla":d.get("siglaTipo"),
-                "numero":d.get("numero"),"ano":d.get("ano"),
+                "casa":"Camara",
+                "id": pid, "sigla": d.get("siglaTipo"),
+                "numero": d.get("numero"), "ano": d.get("ano"),
                 "data_apresentacao": data or "",
-                "ementa":d.get("ementa"),
-                "linkPagina":f"https://www.camara.leg.br/propostas-legislativas/{pid}",
+                "ementa": d.get("ementa"),
+                "autor": det_aut.get("autor",""),
+                "autor_partidos": det_aut.get("autor_partidos",""),
+                "autor_ufs": det_aut.get("autor_ufs",""),
+                "linkPagina": f"https://www.camara.leg.br/propostas-legislativas/{pid}",
                 "inteiro_teor_url": _camara_inteiro_teor_url(pid) or "",
                 "ingest_at": now_br().strftime("%Y-%m-%d %H:%M:%S"),
             })
@@ -234,20 +359,56 @@ def camara_df_hoje() -> pd.DataFrame:
         df = df.sort_values(["data_apresentacao","id"], ascending=[False, False]).reset_index(drop=True)
     return df
 
-# ====================== APPEND no Google Sheets (dedupe) ======================
-SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")  # defina no Actions/locais
-SHEET_SENADO = os.environ.get("SHEET_SENADO", "Senado")
-SHEET_CAMARA = os.environ.get("SHEET_CAMARA", "Camara")
+# =========================================================
+#                 APPEND no Google Sheets (dedupe)
+# =========================================================
+SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")
+SHEET_SENADO   = os.environ.get("SHEET_SENADO", "Senado")
+SHEET_CAMARA   = os.environ.get("SHEET_CAMARA", "Camara")
 CREDENTIALS_JSON = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "credentials.json")
+
+NEEDED_COLUMNS = [
+    "uid","casa",
+    # Identificadores
+    "codigo","id","sigla","numero","ano",
+    # Datas/ementa
+    "data_apresentacao","ementa",
+    # Autoria
+    "autor","autor_partidos","autor_ufs",
+    # Links + controle
+    "linkPagina","inteiro_teor_url","ingest_at",
+]
+
+def _normalize_columns(df: pd.DataFrame, casa: str) -> pd.DataFrame:
+    """Garante que todas as colunas existam (preenchendo vazio) e como string."""
+    for col in NEEDED_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    # Zera colunas que não se aplicam a cada casa
+    if casa == "Senado":
+        df["id"] = ""      # Senado não tem 'id'
+    else:
+        df["codigo"] = ""  # Câmara não tem 'codigo'
+    # Tudo como string para o Sheets
+    for c in NEEDED_COLUMNS:
+        df[c] = df[c].fillna("").astype(str)
+    return df[NEEDED_COLUMNS].copy()
 
 def append_dedupe(df: pd.DataFrame, sheet_name: str):
     """
-    Lê UIDs existentes, filtra apenas novos e faz append em lote.
-    Se a aba não existir, cria com header.
+    Lê UIDs existentes (coluna A), filtra apenas novos e faz append.
+    Cria a aba com header se não existir.
     """
     import gspread
     from google.oauth2.service_account import Credentials
     from gspread_dataframe import set_with_dataframe
+
+    if df is None or df.empty:
+        print(f"[{sheet_name}] nenhum dado para enviar.")
+        return
+    if not SPREADSHEET_ID:
+        print("SPREADSHEET_ID não definido; pulando envio ao Sheets.")
+        return
 
     scopes = ["https://www.googleapis.com/auth/spreadsheets",
               "https://www.googleapis.com/auth/drive"]
@@ -255,51 +416,43 @@ def append_dedupe(df: pd.DataFrame, sheet_name: str):
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(SPREADSHEET_ID)
 
-    # cria worksheet se não existir
+    casa = "Senado" if sheet_name.lower().startswith("sen") else "Camara"
+    df = _normalize_columns(df, casa)
+
+    # Abre ou cria worksheet
     try:
         ws = sh.worksheet(sheet_name)
+        existing = set(ws.col_values(1)[1:])  # uids existentes (ignora header)
+        new_df = df[~df["uid"].isin(existing)].copy()
+        if new_df.empty:
+            print(f"[{sheet_name}] nada novo para anexar.")
+            return
+        # Append só dos valores (sem header)
+        ws.append_rows(new_df.values.tolist(), value_input_option="RAW")
+        print(f"[{sheet_name}] adicionadas {len(new_df)} linhas novas.")
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=sheet_name, rows="100", cols="20")
-        # escreve header
-        set_with_dataframe(ws, df.head(0))
-    
-    # lê UIDs existentes (coluna A)
-    existing = set()
-    try:
-        colA = ws.col_values(1)  # 1-based
-        existing = set(colA[1:])  # ignora header
-    except Exception:
-        pass
-
-    new_df = df[~df["uid"].astype(str).isin(existing)].copy()
-    if new_df.empty:
-        print(f"[{sheet_name}] nada novo para anexar.")
-        return
-
-    # garante tudo como str (Sheets-friendly)
-    for c in new_df.columns:
-        new_df[c] = new_df[c].astype(str)
-
-    # append mantendo header apenas se a planilha estiver vazia
-    values = [new_df.columns.tolist()] + new_df.values.tolist() if len(existing)==0 else new_df.values.tolist()
-    ws.append_rows(values, value_input_option="RAW")
-    print(f"[{sheet_name}] adicionadas {len(new_df)} linhas novas.")
+        ws = sh.add_worksheet(title=sheet_name, rows="100", cols=str(len(NEEDED_COLUMNS)+2))
+        set_with_dataframe(ws, df, include_index=False, include_column_header=True, resize=True)
+        print(f"[{sheet_name}] criada e preenchida com {len(df)} linhas.")
 
 def main():
+    # Coleta
     senado = senado_df_hoje()
     camara = camara_df_hoje()
 
-    print("Senado:", len(senado), "linhas | Câmara:", len(camara), "linhas")
+    print(f"Senado: {len(senado)} linhas | Câmara: {len(camara)} linhas")
 
-    if SPREADSHEET_ID:
-        append_dedupe(senado, SHEET_SENADO)
-        append_dedupe(camara, SHEET_CAMARA)
-    else:
-        # saída local (debug)
+    # Modo local (debug) caso não haja planilha configurada
+    if not SPREADSHEET_ID:
         stamp = today_compact()
         senado.to_csv(f"senado_todas_{stamp}.csv", index=False)
         camara.to_csv(f"camara_todas_{stamp}.csv", index=False)
-        print("Arquivos locais salvos.")
+        print("SPREADSHEET_ID não definido; arquivos CSV locais foram salvos.")
+        return
+
+    # Append deduplicado
+    append_dedupe(senado, SHEET_SENADO)
+    append_dedupe(camara, SHEET_CAMARA)
 
 if __name__ == "__main__":
     main()
