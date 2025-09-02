@@ -23,11 +23,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Write service account key
+      - name: Write service account key (unescape \n)
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY_JSON }}
         run: |
           echo "$GCP_SA_KEY" > credentials.json
+          # converte \n literais em quebras de linha reais
+          sed -i 's/\\n/\n/g' credentials.json
 
       - name: Run collector
         env:
