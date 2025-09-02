@@ -127,8 +127,7 @@ def _extract_keywords(texto: str) -> str:
     for original, norm_kw in _PAL_CHAVE_NORM:
         if norm_kw and norm_kw in nt:
             achadas.append(original)
-    # dedup preservando ordem
-    return "; ".join(dict.fromkeys(achadas).keys())
+    return "; ".join(dict.fromkeys(achadas).keys())  # dedup preservando ordem
 
 # ====================== Helpers de DATA/HORA (USER_ENTERED) ======================
 def _fmt_date(v) -> str:
@@ -145,7 +144,6 @@ def _fmt_dt(v) -> str:
     try:
         d = pd.to_datetime(v, errors="coerce")
         if pd.isna(d): return ""
-        # drop tz pra evitar problemas
         d = d.tz_localize(None) if getattr(d, "tzinfo", None) is not None else d
         return d.strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
@@ -250,6 +248,30 @@ def _senado_inteiro_teor(codigo_materia):
     if u: return u, d
     return _senado_inteiro_teor_page(codigo_materia)
 
+def _senado_primeira_autoria_da_pagina(codigo_materia) -> str | None:
+    """
+    Abre a página pública da matéria e retorna o conteúdo da PRIMEIRA 'Autoria:'.
+    Útil quando a API traz 'Câmara dos Deputados' como autor.
+    """
+    page = f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo_materia}"
+    try:
+        r = requests.get(page, timeout=40, headers=HDR)
+        if r.status_code != 200:
+            return None
+        soup = BeautifulSoup(r.text, "html.parser")
+        # bloco onde geralmente fica o cabeçalho da matéria
+        info = soup.select_one("div.bg-info-conteudo") or soup
+        for p in info.select("p"):
+            strong = p.find("strong")
+            if strong and _normalize(strong.get_text()) == "autoria:":
+                span = p.find("span")
+                if span:
+                    val = span.get_text(strip=True)
+                    return val if val else None
+        return None
+    except Exception:
+        return None
+
 # Regex para extrair (PARTIDO/UF) quando vier como string única
 _rx_autor_chunk = re.compile(r"""\s*
     (?P<nome>.+?)
@@ -301,7 +323,7 @@ def senado_df_hoje() -> pd.DataFrame:
         data   = _get(m, "Data")   or _get(dados, "DataApresentacao") or _get(m, "DataApresentacao")
         ementa = (_get(m, "Ementa") or _get(dados, "EmentaMateria") or _get(m, "EmentaMateria") or "")
 
-        # Autoria
+        # Autoria (da API)
         autor_str = _get(m, "Autor")
         nomes, partidos, ufs = [], [], []
         for bloco in ("Autoria","Autores"):
@@ -318,11 +340,18 @@ def senado_df_hoje() -> pd.DataFrame:
                     if nome: nomes.append(nome)
                     partidos.append(partido if partido else None)
                     ufs.append(uf if uf else None)
-        if (not any(partidos) or not any(ufs)) and autor_str:
-            n2, p2, u2 = _parse_autores_senado_texto(autor_str)
-            if n2 and not nomes: nomes = n2
-            if not any(partidos): partidos = p2
-            if not any(ufs): ufs = u2
+
+        # Se vier "Câmara dos Deputados", buscar a PRIMEIRA "Autoria:" na página pública
+        if _normalize(autor_str) == _normalize("Câmara dos Deputados"):
+            autor_page = _senado_primeira_autoria_da_pagina(codigo)
+            if autor_page:
+                autor_str = autor_page
+                # tenta extrair partido/UF se vier entre parênteses (nem sempre é aplicável)
+                n2, p2, u2 = _parse_autores_senado_texto(autor_page)
+                if n2 and not nomes: nomes = n2
+                if not any(partidos): partidos = p2
+                if not any(ufs): ufs = u2
+
         if not autor_str and nomes:
             autor_str = ", ".join(nomes)
 
@@ -560,7 +589,7 @@ def append_dedupe(df: pd.DataFrame, sheet_name: str):
         if new_df.empty:
             print(f"[{sheet_name}] nada novo para anexar.")
             return
-        # USER_ENTERED => o Sheets interpreta "YYYY-MM-DD" e "YYYY-MM-DD HH:MM:SS"
+        # USER_ENTERED => Sheets interpreta "YYYY-MM-DD" e "YYYY-MM-DD HH:MM:SS"
         ws.append_rows(new_df.values.tolist(), value_input_option="USER_ENTERED")
         print(f"[{sheet_name}] adicionadas {len(new_df)} linhas novas.")
     except gspread.WorksheetNotFound:
