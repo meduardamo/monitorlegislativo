@@ -1,17 +1,28 @@
-name: Monitor Legislativo
+name: coletar-proposicoes
 
 on:
   schedule:
-    - cron: "0 10,14,18,22 * * *"  # 07/11/15/19 BRT
-    - cron: "0 2 * * *"            # 23 BRT (02 UTC do dia seguinte)
+    - cron: "0 10,14,18,22 * * *"  # 07/11/15/19 BRT (UTC: 10/14/18/22)
+    - cron: "0 2 * * *"            # 23 BRT (UTC: 02 do dia seguinte)
   workflow_dispatch: {}
 
 jobs:
   run:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Verify credentials.json exists
+        run: |
+          test -f credentials.json || (echo "credentials.json não encontrado no repo" && exit 1)
+          python - <<'PY'
+          import json
+          with open('credentials.json', 'r') as f:
+              json.load(f)
+          print("credentials.json OK")
+          PY
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -23,19 +34,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Write service account key (unescape \n)
+      - name: Run monitor_legislativo
         env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY_JSON }}
-        run: |
-          echo "$GCP_SA_KEY" > credentials.json
-          # converte \n literais em quebras de linha reais
-          sed -i 's/\\n/\n/g' credentials.json
-
-      - name: Run collector
-        env:
-          SPREADSHEET_ID: "15IbcKPsHGQ6lyCXX66HVuNczboLecZbZz7fwVfgIKXc"
-          SHEET_SENADO: "Senado"
-          SHEET_CAMARA: "Camara"
-          GOOGLE_APPLICATION_CREDENTIALS: "credentials.json"
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          SHEET_SENADO:    ${{ secrets.SHEET_SENADO }}
+          SHEET_CAMARA:    ${{ secrets.SHEET_CAMARA }}
+          GOOGLE_APPLICATION_CREDENTIALS: credentials.json
         run: |
           python monitor_legislativo.py
