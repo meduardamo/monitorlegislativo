@@ -130,6 +130,30 @@ def _extract_keywords(texto: str) -> str:
     # dedup preservando ordem
     return "; ".join(dict.fromkeys(achadas).keys())
 
+# ====================== Helpers de DATA/HORA (USER_ENTERED) ======================
+def _fmt_date(v) -> str:
+    """YYYY-MM-DD ou '' (string para USER_ENTERED no Sheets)."""
+    try:
+        d = pd.to_datetime(v, errors="coerce")
+        if pd.isna(d): return ""
+        return d.strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+def _fmt_dt(v) -> str:
+    """YYYY-MM-DD HH:MM:SS ou '' (string para USER_ENTERED no Sheets)."""
+    try:
+        d = pd.to_datetime(v, errors="coerce")
+        if pd.isna(d): return ""
+        # drop tz pra evitar problemas
+        d = d.tz_localize(None) if getattr(d, "tzinfo", None) is not None else d
+        return d.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        try:
+            return v.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return ""
+
 # =========================================================
 #                       SENADO
 # =========================================================
@@ -177,7 +201,6 @@ def _senado_inteiro_teor_api(codigo_materia):
             return url, (str(data) if data else None)
 
     prefer = ("projeto","parecer","substitutivo","emenda","requerimento","texto")
-
     # 2) PDFs preferidos
     for t in textos:
         desc, form, url, data = extract(t)
@@ -191,7 +214,7 @@ def _senado_inteiro_teor_api(codigo_materia):
         if isinstance(url, str) and url.startswith("http") and ("pdf" in form or url.lower().endswith(".pdf")):
             return url, (str(data) if data else None)
 
-    # 4) primeiro http
+    # 4) primeiro http válido
     for t in textos:
         desc, form, url, data = extract(t)
         if isinstance(url, str) and url.startswith("http"):
@@ -289,8 +312,8 @@ def senado_df_hoje() -> pd.DataFrame:
                 for a in alist or []:
                     if not isinstance(a, dict): continue
                     nome = a.get("NomeAutor") or a.get("NomeParlamentar")
-                    partido = (a.get("SiglaPartidoAutor") or a.get("SiglaPartido")
-                               or a.get("PartidoAutor") or a.get("Partido"))
+                    partido = (a.get("SiglaPartidoAutor") or a.get("SiglaPartido") or
+                               a.get("PartidoAutor") or a.get("Partido"))
                     uf = a.get("UfAutor") or a.get("SiglaUF") or a.get("UF")
                     if nome: nomes.append(nome)
                     partidos.append(partido if partido else None)
@@ -305,15 +328,11 @@ def senado_df_hoje() -> pd.DataFrame:
 
         it_url, _ = _senado_inteiro_teor(codigo)
 
-        # >>> Data como date real e Ingest At como datetime real (naive p/ Google Sheets)
-        data_date = pd.to_datetime(data, errors="coerce").date() if data else None
-        ingest_dt = now_br().replace(tzinfo=None)
-
         rows.append({
             "UID": f"Senado:{codigo}",
             "Casa Atual": "Senado",
             "Sigla": sigla, "Número": numero, "Ano": ano,
-            "Data Apresentação": data_date,
+            "Data Apresentação": _fmt_date(data),
             "Ementa": ementa,
             "Palavras Chave": _extract_keywords(ementa),
             "Autor": autor_str or "",
@@ -321,7 +340,7 @@ def senado_df_hoje() -> pd.DataFrame:
             "Autor UFs": ", ".join([u for u in ufs if u]) if any(ufs) else "",
             "Link Página": f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo}",
             "Inteiro Teor URL": it_url or "",
-            "Ingest At": ingest_dt,
+            "Ingest At": _fmt_dt(now_br()),
         })
 
     df = pd.DataFrame(rows)
@@ -454,16 +473,13 @@ def camara_df_hoje() -> pd.DataFrame:
 
             ementa = d.get("ementa", "") or ""
 
-            data_date = pd.to_datetime(data, errors="coerce").date() if data else None
-            ingest_dt = now_br().replace(tzinfo=None)
-
             rows.append({
                 "UID": f"Camara:{pid}",
                 "Casa Atual": "Camara",
                 "Sigla": d.get("siglaTipo"),
                 "Número": d.get("numero"),
                 "Ano": d.get("ano"),
-                "Data Apresentação": data_date,
+                "Data Apresentação": _fmt_date(data),
                 "Ementa": ementa,
                 "Palavras Chave": _extract_keywords(ementa),
                 "Autor": autores.get("autor",""),
@@ -471,7 +487,7 @@ def camara_df_hoje() -> pd.DataFrame:
                 "Autor UFs": autores.get("autor_ufs",""),
                 "Link Página": f"https://www.camara.leg.br/propostas-legislativas/{pid}",
                 "Inteiro Teor URL": it_url or "",
-                "Ingest At": ingest_dt,
+                "Ingest At": _fmt_dt(now_br()),
             })
         next_link = next((lk for lk in j.get("links", []) if lk.get("rel")=="next"), None)
         if not next_link: break
@@ -501,22 +517,13 @@ NEEDED_COLUMNS = [
 ]
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    # garantir existência
+    # garantir que todas existam
     for col in NEEDED_COLUMNS:
         if col not in df.columns:
-            df[col] = None
-
-    # Data Apresentação -> date; Ingest At -> datetime
-    if "Data Apresentação" in df.columns:
-        df["Data Apresentação"] = pd.to_datetime(df["Data Apresentação"], errors="coerce").dt.date
-    if "Ingest At" in df.columns:
-        # remover timezone para o Google Sheets
-        df["Ingest At"] = pd.to_datetime(df["Ingest At"], errors="coerce").dt.tz_localize(None)
-
-    # demais como string (sem mexer nas duas acima)
-    for c in [x for x in NEEDED_COLUMNS if x not in ("Data Apresentação","Ingest At")]:
+            df[col] = ""
+    # strings (Sheets interpretará datas por USER_ENTERED)
+    for c in NEEDED_COLUMNS:
         df[c] = df[c].fillna("").astype(str)
-
     return df[NEEDED_COLUMNS].copy()
 
 def _ensure_header(ws, header):
@@ -553,13 +560,14 @@ def append_dedupe(df: pd.DataFrame, sheet_name: str):
         if new_df.empty:
             print(f"[{sheet_name}] nada novo para anexar.")
             return
-        ws.append_rows(new_df.values.tolist(), value_input_option="RAW")
+        # USER_ENTERED => o Sheets interpreta "YYYY-MM-DD" e "YYYY-MM-DD HH:MM:SS"
+        ws.append_rows(new_df.values.tolist(), value_input_option="USER_ENTERED")
         print(f"[{sheet_name}] adicionadas {len(new_df)} linhas novas.")
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=sheet_name, rows=str(max(100, len(df)+10)), cols=len(NEEDED_COLUMNS))
         _ensure_header(ws, NEEDED_COLUMNS)
         if not df.empty:
-            ws.append_rows(df.values.tolist(), value_input_option="RAW")
+            ws.append_rows(df.values.tolist(), value_input_option="USER_ENTERED")
         print(f"[{sheet_name}] criada e preenchida com {len(df)} linhas.")
 
 # =========================================================
@@ -572,7 +580,7 @@ def main():
     print(f"Senado: {len(senado)} linhas | Câmara: {len(camara)} linhas")
 
     if not SPREADSHEET_ID:
-        # modo local (debug): salva CSVs (ISO -> Sheets reconhece)
+        # modo local (debug): salva CSVs (ISO -> Sheets reconhece ao importar)
         stamp = today_compact()
         senado.to_csv(f"senado_{stamp}.csv", index=False)
         camara.to_csv(f"camara_{stamp}.csv", index=False)
