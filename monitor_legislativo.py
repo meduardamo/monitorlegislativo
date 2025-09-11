@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
-# Monitor Legislativo – geral + abas por cliente
+# Monitor Legislativo – Geral + Abas por Cliente (Câmara + Senado)
+# Requisitos: requests, pandas, bs4, gspread, google-auth
+
 import os, re, time, requests, pandas as pd, unicodedata
 from datetime import datetime
 from urllib.parse import urlparse
@@ -48,12 +50,14 @@ def _last_int_from_uri(u: str|None):
     except Exception:
         return None
 
-# ====================== Normalização ======================
 def _normalize(text: str) -> str:
     if text is None: return ""
     t = unicodedata.normalize("NFD", str(text))
     t = "".join(c for c in t if unicodedata.category(c) != "Mn")
     return t.lower().strip()
+
+def _join_unique(seq):
+    return ", ".join(dict.fromkeys([x for x in _as_list(seq) if x]))
 
 # ====================== Mapa: Cliente → Tema → Keywords ======================
 CLIENT_THEME_DATA = """
@@ -72,34 +76,32 @@ Vital Strategies|Saúde|Saúde mental; Dados para a saúde; Morte evitável; Doe
 """.strip()
 
 def _parse_client_theme_data(text: str):
-    """
-    Retorna:
-      CLIENT_THEME: {cliente: {tema: [keywords...]}}
-      KEYWORD_INDEX: {norm_kw: set((cliente, tema, original_kw))}
-    """
     client_theme: dict[str, dict[str, list[str]]] = {}
     for raw in text.splitlines():
-        if not raw.strip(): continue
+        if not raw.strip(): 
+            continue
         cliente, tema, kws = [x.strip() for x in raw.split("|", 2)]
         kw_list = [k.strip() for k in kws.split(";") if k.strip()]
         client_theme.setdefault(cliente, {}).setdefault(tema, [])
         client_theme[cliente][tema].extend(kw_list)
-    # dedupe e limpar
+    # dedupe/normalizar por tema
     for c in client_theme:
         for t in client_theme[c]:
             seen = set()
             cleaned = []
             for k in client_theme[c][t]:
-                if k.lower() not in seen:
-                    seen.add(k.lower()); cleaned.append(k)
+                kk = _normalize(k)
+                if kk not in seen:
+                    seen.add(kk); cleaned.append(k)
             client_theme[c][t] = cleaned
-    # index por palavra normalizada
+    # índice por palavra
     kw_index: dict[str, set[tuple[str,str,str]]] = {}
     for c, temas in client_theme.items():
         for t, kws in temas.items():
             for k in kws:
                 nk = _normalize(k)
-                if not nk: continue
+                if not nk: 
+                    continue
                 kw_index.setdefault(nk, set()).add((c, t, k))
     return client_theme, kw_index
 
@@ -114,7 +116,6 @@ def _extract_kw_client_theme(texto: str):
             for cliente, tema, original_kw in buckets:
                 matched_kws.append(original_kw)
                 pairs.add((cliente, tema))
-    # únicos, preservando ordem de 1ª ocorrência
     kw_str = "; ".join(dict.fromkeys(matched_kws).keys())
     clientes_str = "; ".join(sorted({c for c, _ in pairs}))
     temas_str = "; ".join(sorted({t for _, t in pairs}))
@@ -230,31 +231,7 @@ def _senado_inteiro_teor(codigo_materia):
     if u: return u, d
     return _senado_inteiro_teor_page(codigo_materia)
 
-def _senado_primeira_autoria_da_pagina(codigo_materia) -> str | None:
-    url = f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo_materia}"
-    try:
-        r = requests.get(url, timeout=45, headers=HDR)
-        if r.status_code != 200:
-            return None
-        soup = BeautifulSoup(r.text, "html.parser")
-        holders = soup.select("div.span12.sf-bloco-paragrafos-condensados") or soup.select("div.bg-info-conteudo") or [soup]
-        for holder in holders:
-            for p in holder.find_all("p"):
-                strong = p.find("strong")
-                if not strong: continue
-                label = _normalize(strong.get_text(" ", strip=True).rstrip(":"))
-                if label == "autoria":
-                    span = p.find("span")
-                    if span:
-                        val = span.get_text(" ", strip=True)
-                        if val: return val
-                    full = p.get_text(" ", strip=True)
-                    val = re.sub(r'(?i)^\s*autoria\s*:\s*', "", full).strip()
-                    if val: return val
-        return None
-    except Exception:
-        return None
-
+# Regex "Nome (PARTIDO/UF)" com vários autores separados por ';' ou por '), '
 _rx_autor_chunk = re.compile(r"""\s*
     (?P<nome>.+?)
     (?:\s*\(\s*(?P<partido>[A-ZÀ-Ü\-]+)\s*/\s*(?P<uf>[A-Z]{2})\s*\))?
@@ -274,10 +251,38 @@ def _parse_autores_senado_texto(autor_str: str):
     for ch in chunks:
         m = _rx_autor_chunk.match(ch)
         if m:
-            nomes.append(m.group('nome')); partidos.append(m.group('partido')); ufs.append(m.group('uf'))
+            nomes.append(m.group('nome'))
+            partidos.append(m.group('partido'))
+            ufs.append(m.group('uf'))
         else:
             nomes.append(ch); partidos.append(None); ufs.append(None)
     return nomes, partidos, ufs
+
+def _senado_primeira_autoria_da_pagina(codigo_materia) -> str | None:
+    url = f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo_materia}"
+    try:
+        r = requests.get(url, timeout=45, headers=HDR)
+        if r.status_code != 200:
+            return None
+        soup = BeautifulSoup(r.text, "html.parser")
+        holders = soup.select("div.span12.sf-bloco-paragrafos-condensados") or soup.select("div.bg-info-conteudo") or [soup]
+        for holder in holders:
+            for p in holder.find_all("p"):
+                strong = p.find("strong")
+                if not strong: 
+                    continue
+                label = _normalize(strong.get_text(" ", strip=True).rstrip(":"))
+                if label == "autoria":
+                    span = p.find("span")
+                    if span:
+                        val = span.get_text(" ", strip=True)
+                        if val: return val
+                    full = p.get_text(" ", strip=True)
+                    val = re.sub(r'(?i)^\s*autoria\s*:\s*', "", full).strip()
+                    if val: return val
+        return None
+    except Exception:
+        return None
 
 def senado_df_hoje() -> pd.DataFrame:
     params = {"dataInicioApresentacao": today_compact(), "dataFimApresentacao": today_compact()}
@@ -323,13 +328,13 @@ def senado_df_hoje() -> pd.DataFrame:
                     partidos.append(partido if partido else None)
                     ufs.append(uf if uf else None)
 
-        # Caso especial: quando a API diz "Câmara dos Deputados", ler página
+        # quando a API disser "Câmara dos Deputados", ler a página e sobrescrever
         if _normalize(autor_str) == _normalize("Câmara dos Deputados"):
             autor_page = _senado_primeira_autoria_da_pagina(codigo)
             if autor_page:
                 autor_str = autor_page
 
-        # >>> SEMPRE tentar decompor a string de autores (ex.: "Senador X (PL/RJ); Senadora Y (PT/CE)")
+        # sempre tentar decompor a string de autores
         if autor_str:
             n2, p2, u2 = _parse_autores_senado_texto(autor_str)
             if n2 and not nomes: 
@@ -521,12 +526,12 @@ def camara_df_hoje() -> pd.DataFrame:
 # =========================================================
 #                 APPEND no Google Sheets (dedupe)
 # =========================================================
-SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")  # geral (Câmara/Senado)
+SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")  # planilha geral
 SHEET_SENADO   = os.environ.get("SHEET_SENADO", "Senado")
 SHEET_CAMARA   = os.environ.get("SHEET_CAMARA", "Camara")
 
-# nova planilha: abas por cliente
-SPREADSHEET_ID_CLIENTES = os.environ.get("SPREADSHEET_ID_CLIENTES")  # <- adicione como secret
+# nova planilha com abas por cliente (Câmara + Senado)
+SPREADSHEET_ID_CLIENTES = os.environ.get("SPREADSHEET_ID_CLIENTES")
 
 CREDENTIALS_JSON = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "credentials.json")
 
@@ -573,6 +578,7 @@ def append_dedupe(df: pd.DataFrame, sheet_name: str):
     sh = _open_sheet(SPREADSHEET_ID)
     df = _normalize_columns(df)
     try:
+        import gspread
         ws = sh.worksheet(sheet_name)
         _ensure_header(ws, NEEDED_COLUMNS)
         existing = set(ws.col_values(1)[1:])
@@ -594,7 +600,7 @@ def append_dedupe(df: pd.DataFrame, sheet_name: str):
             raise
 
 def append_por_cliente(df_total: pd.DataFrame):
-    """Envia para a planilha SPREADSHEET_ID_CLIENTES, uma aba por cliente (sigla)."""
+    """Envio para SPREADSHEET_ID_CLIENTES, uma aba por cliente (sigla), juntando Câmara+Senado."""
     if not SPREADSHEET_ID_CLIENTES:
         print("SPREADSHEET_ID_CLIENTES não definido; pulando planilha por cliente.")
         return
@@ -607,15 +613,16 @@ def append_por_cliente(df_total: pd.DataFrame):
 
     all_clients = list(CLIENT_THEME.keys())
 
-    # regex segura para achar a sigla dentro de campo 'Clientes' separado por ';'
     for client in all_clients:
+        # match seguro da sigla dentro do campo 'Clientes' separado por ';'
         mask = df_total["Clientes"].str.contains(rf'(^|;\s*){re.escape(client)}(\s*;|$)', case=False, na=False)
         sub = df_total[mask].copy()
-        if sub.empty:
-            print(f"[{client}] sem linhas novas hoje.")
-            continue
         sheet_name = client
+        if sub.empty:
+            print(f"[{sheet_name}] sem linhas novas hoje.")
+            continue
         try:
+            import gspread
             ws = sh.worksheet(sheet_name)
             _ensure_header(ws, NEEDED_COLUMNS)
             existing = set(ws.col_values(1)[1:])
@@ -651,14 +658,19 @@ def main():
         print("Sem IDs de planilha; arquivos CSV salvos.")
         return
 
-    # 1) Planilha geral (se tiver ID)
+    # 1) Planilha geral
     if SPREADSHEET_ID:
         append_dedupe(senado, SHEET_SENADO)
         append_dedupe(camara, SHEET_CAMARA)
 
     # 2) Planilha por cliente (Câmara + Senado combinados)
     if SPREADSHEET_ID_CLIENTES:
-        total = pd.concat([senado, camara], ignore_index=True) if not senado.empty or not camara.empty else pd.DataFrame(columns=NEEDED_COLUMNS)
+        if senado is None or senado.empty:
+            total = camara.copy()
+        elif camara is None or camara.empty:
+            total = senado.copy()
+        else:
+            total = pd.concat([senado, camara], ignore_index=True)
         append_por_cliente(total)
 
 if __name__ == "__main__":
