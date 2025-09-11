@@ -1,4 +1,5 @@
-# monitor_legislativo.py
+# -*- coding: utf-8 -*-
+# Monitor Legislativo – geral + abas por cliente
 import os, re, time, requests, pandas as pd, unicodedata
 from datetime import datetime
 from urllib.parse import urlparse
@@ -47,58 +48,79 @@ def _last_int_from_uri(u: str|None):
     except Exception:
         return None
 
-# ====================== Normalização / Palavras-chave ======================
+# ====================== Normalização ======================
 def _normalize(text: str) -> str:
     if text is None: return ""
     t = unicodedata.normalize("NFD", str(text))
     t = "".join(c for c in t if unicodedata.category(c) != "Mn")
     return t.lower().strip()
 
-PALAVRAS_CHAVE = [
-    'Infância','Criança','Infantil','Infâncias','Crianças',
-    'Educação','Ensino','Escolaridade',
-    'Plano Nacional da Educação','PNE','Educacional',
-    'Alfabetização','Letramento',
-    'Saúde','Telessaúde','Telemedicina',
-    'Digital','Digitais','Prontuário',
-    'Programa Saúde na Escola','PSE',
-    'Psicosocial','Mental','Saúde Mental','Dados para a Saúde','Morte Evitável',
-    'Doenças Crônicas Não Transmissíveis','Rotulagem de Bebidas Alcoólicas',
-    'Educação em Saúde','Bebidas Alcoólicas','Imposto Seletivo',
-    'Rotulagem de Alimentos','Alimentos Ultraprocessados',
-    'Publicidade Infantil','Publicidade de Alimentos Ultraprocessados',
-    'Tributação de Bebidas Alcoólicas','Alíquota de Bebidas Alcoólicas',
-    'Cigarro Eletrônico','Controle de Tabaco','Violência Doméstica',
-    'Exposição a Fatores de Risco','Departamento de Saúde Mental',
-    'Hipertensão Arterial','Alimentação Escolar','PNAE','Agora Tem Especialistas',
-    # Alfabetização geral
-    'Alfabetização','Alfabetização na Idade Certa','Criança Alfabetizada','Meta de Alfabetização',
-    'Plano Nacional de Alfabetização','Programa Criança Alfabetizada','Idade Certa para Alfabetização',
-    'Alfabetização de Crianças','Alfabetização Inicial','Alfabetização Plena',
-    'Alfabetização em Língua Portuguesa','Analfabetismo','Erradicação do Analfabetismo',
-    'Programa Nacional de Alfabetização na Idade Certa','Pacto pela Alfabetização',
-    'Política Nacional de Alfabetização','Recomposição das Aprendizagens em Alfabetização',
-    'Competências de Alfabetização','Avaliação da Alfabetização','Saeb Alfabetização',
-    # Matemática (Educação Básica)
-    'Alfabetização Matemática','Analfabetismo Matemático','Aprendizagem em Matemática',
-    'Recomposição das Aprendizagens em Matemática','Recomposição de Aprendizagem',
-    'Competências Matemáticas','Proficiência em Matemática','Avaliação Diagnóstica de Matemática',
-    'Avaliação Formativa de Matemática','Política Nacional de Matemática','Saeb Matemática',
-    'Ideb Matemática','BNCC Matemática','Matemática no Ensino Fundamental','Matemática no Ensino Médio',
-    'Anos Iniciais de Matemática','Anos Finais de Matemática','OBMEP',
-    'Olimpíada Brasileira de Matemática das Escolas Públicas','Olimpíada de Matemática','PNLD Matemática'
-]
-_PAL_CHAVE_NORM = [(kw, _normalize(kw)) for kw in PALAVRAS_CHAVE]
+# ====================== Mapa: Cliente → Tema → Keywords ======================
+CLIENT_THEME_DATA = """
+IAS|Educação|Matemática; Alfabetização; Alfabetização Matemática; Recomposição de aprendizagem; Plano Nacional de Educação
+ISG|Educação|Tempo Integral; Ensino em tempo integral; Ensino Profissional e Tecnológico; Fundeb; PROPAG; Educação em tempo integral; Escola em tempo integral; Plano Nacional de Educação; Programa escola em tempo integral; Programa Pé-de-meia; PNEERQ; INEP; FNDE; Conselho Nacional de Educação; PDDE; Programa de Fomento às Escolas de Ensino Médio em Tempo Integral; Celular nas escolas; Juros da Educação
+IU|Educação|Gestão Educacional; Diretores escolares; Magistério; Professores ensino médio; Sindicatos de professores; Ensino Médio; Fundeb; Adaptações de Escolas; Educação Ambiental; Plano Nacional de Educação; PDDE; Programa Pé de Meia; INEP; FNDE; Conselho Nacional de Educação; VAAT; VAAR; Secretaria Estadual de Educação; Celular nas escolas; EAD; Juro da educação; Recomposição de Aprendizagem
+Reúna|Educação|Matemática; Alfabetização; Alfabetização Matemática; Recomposição de aprendizagem; Plano Nacional de Educação; Emendas parlamentares educação
+REMS|Esportes|Esporte amador; Esporte para toda a vida; Esporte e desenvolvimento social; Financiamento do esporte; Lei de Incentivo ao Esporte; Plano Nacional de Esporte; Conselho Nacional de Esporte; Emendas parlamentares esporte
+FMCSV|Primeira infância|Criança; Infância; infanto-juvenil; educação básica; PNE; FNDE; Fundeb; VAAR; VAAT; educação infantil; maternidade; paternidade; alfabetização; creche; pré-escola; parentalidade; materno-infantil; infraestrutura escolar; política nacional de cuidados; Plano Nacional de Educação; Bolsa Família; Conanda; visitação domiciliar; Homeschooling; Política Nacional Integrada da Primeira Infância
+IEPS|Saúde|SUS; Sistema Único de Saúde; fortalecimento; Universalidade; Equidade em saúde; populações vulneráveis; desigualdades sociais; Organização do SUS; gestão pública; políticas públicas em saúde; Governança do SUS; regionalização; descentralização; Regionalização em saúde; Políticas públicas em saúde; População negra em saúde; Saúde indígena; Povos originários; Saúde da pessoa idosa; envelhecimento ativo; Atenção Primária; Saúde da criança; Saúde do adolescente; Saúde da mulher; Saúde do homem; Saúde da pessoa com deficiência; Saúde da população LGBTQIA+; Financiamento da saúde; atenção primária; tripartite; orçamento; Emendas e orçamento da saúde; Ministério da Saúde; Trabalhadores de saúde; Força de trabalho em saúde; Recursos humanos em saúde; Formação profissional de saúde; Cuidados primários em saúde; Emergências climáticas e ambientais em saúde; mudanças climáticas; adaptação climática; saúde ambiental; políticas climáticas; Vigilância em saúde; epidemiológica; Emergência em saúde; estado de emergência; Saúde suplementar; complementar; privada; planos de saúde; seguros; seguradoras; planos populares; Anvisa; gestão; governança; ANS; Sandbox regulatório; Cartões e administradoras de benefícios em saúde; Economia solidária em saúde mental; Pessoa em situação de rua; saúde mental; Fiscalização de comunidades terapêuticas; Rede de atenção psicossocial; RAPS; unidades de acolhimento; assistência multiprofissional; centros de convivência; Cannabis; canabidiol; tratamento terapêutico; Desinstitucionalização; manicômios; hospitais de custódia; Saúde mental na infância; adolescência; escolas; comunidades escolares; protagonismo juvenil; Dependência química; vícios; ludopatia; Treinamento em saúde mental; capacitação em saúde mental; Intervenções terapêuticas em saúde mental; Internet e redes sociais na saúde mental; Violência psicológica; Surto psicótico
+Manual|Saúde|Ozempic; Wegovy; Mounjaro; Telemedicina; Telessaúde; CBD; Cannabis Medicinal; CFM; Conselho Federal de Medicina; Farmácia Magistral; Medicamentos Manipulados; Minoxidil; Emagrecedores; Retenção de receita de medicamentos
+Mevo|Saúde|Prontuário eletrônico; dispensação eletrônica; telessaúde; assinatura digital; certificado digital; controle sanitário; prescrição por enfermeiros; doenças crônicas; autonomia da ANPD; Acesso e uso de dados; responsabilização de plataformas digitais; regulamentação de marketplaces; segurança cibernética; inteligência artificial; digitalização do SUS; venda de medicamentos; distribuição de medicamentos; Bula digital; Atesta CFM; SNGPC; Farmacêutico Remoto; Medicamentos Isentos de Prescrição; MIPs; RNDS; Rede Nacional de Dados em Saúde
+Giro de notícias|Temas gerais para o Giro de Notícias e clipping cactus|Governo Lula; Presidente Lula; Governo; Governo Federal; Governo economia; Economia; Governo internacional; Saúde; Medicamento; Vacina; Câncer; Oncologia; Gripe; Diabetes; Obesidade; Alzheimer; Saúde mental; Síndrome respiratória; SUS; Sistema Único de Saúde; Ministério da Saúde; Alexandre Padilha; ANVISA; Primeira Infância; Infância; Criança; Saúde criança; Saúde infantil; cuidado criança; legislação criança; direitos da criança; criança câmara; criança senado; alfabetização; creche; ministério da educação; educação; educação Brasil; escolas; aprendizado; ensino integral; ensino médio; Camilo Santana
+Cactus|Saúde|Saúde mental; saúde mental para meninas; saúde mental para juventude; saúde mental para mulheres; Rede de atenção psicossocial; RAPS; CAPS; Centro de Apoio Psicossocial
+Vital Strategies|Saúde|Saúde mental; Dados para a saúde; Morte evitável; Doenças crônicas não transmissíveis; Rotulagem de bebidas alcoólicas; Educação em saúde; Bebidas alcoólicas; Imposto seletivo; Rotulagem de alimentos; Alimentos ultraprocessados; Publicidade infantil; Publicidade de alimentos ultraprocessados; Tributação de bebidas alcoólicas; Alíquota de bebidas alcoólicas; Cigarro eletrônico; Controle de tabaco; Violência doméstica; Exposição a fatores de risco; Departamento de Saúde Mental; Hipertensão arterial; Saúde digital; Violência contra crianças; Violência contra mulheres; Feminicídio; COP 30
+""".strip()
 
-def _extract_keywords(texto: str) -> str:
-    nt = _normalize(texto)
-    achadas = []
-    for original, norm_kw in _PAL_CHAVE_NORM:
-        if norm_kw and norm_kw in nt:
-            achadas.append(original)
-    return "; ".join(dict.fromkeys(achadas).keys())
+def _parse_client_theme_data(text: str):
+    """
+    Retorna:
+      CLIENT_THEME: {cliente: {tema: [keywords...]}}
+      KEYWORD_INDEX: {norm_kw: set((cliente, tema, original_kw))}
+    """
+    client_theme: dict[str, dict[str, list[str]]] = {}
+    for raw in text.splitlines():
+        if not raw.strip(): continue
+        cliente, tema, kws = [x.strip() for x in raw.split("|", 2)]
+        kw_list = [k.strip() for k in kws.split(";") if k.strip()]
+        client_theme.setdefault(cliente, {}).setdefault(tema, [])
+        client_theme[cliente][tema].extend(kw_list)
+    # dedupe e limpar
+    for c in client_theme:
+        for t in client_theme[c]:
+            seen = set()
+            cleaned = []
+            for k in client_theme[c][t]:
+                if k.lower() not in seen:
+                    seen.add(k.lower()); cleaned.append(k)
+            client_theme[c][t] = cleaned
+    # index por palavra normalizada
+    kw_index: dict[str, set[tuple[str,str,str]]] = {}
+    for c, temas in client_theme.items():
+        for t, kws in temas.items():
+            for k in kws:
+                nk = _normalize(k)
+                if not nk: continue
+                kw_index.setdefault(nk, set()).add((c, t, k))
+    return client_theme, kw_index
 
-# ====================== Helpers de DATA/HORA (USER_ENTERED) ======================
+CLIENT_THEME, KEYWORD_INDEX = _parse_client_theme_data(CLIENT_THEME_DATA)
+
+def _extract_kw_client_theme(texto: str):
+    nt = _normalize(texto or "")
+    matched_kws = []
+    pairs = set()  # (cliente, tema)
+    for nk, buckets in KEYWORD_INDEX.items():
+        if nk and nk in nt:
+            for cliente, tema, original_kw in buckets:
+                matched_kws.append(original_kw)
+                pairs.add((cliente, tema))
+    # únicos, preservando ordem de 1ª ocorrência
+    kw_str = "; ".join(dict.fromkeys(matched_kws).keys())
+    clientes_str = "; ".join(sorted({c for c, _ in pairs}))
+    temas_str = "; ".join(sorted({t for _, t in pairs}))
+    return kw_str, clientes_str, temas_str
+
+# ====================== Helpers de DATA/HORA ======================
 def _fmt_date(v) -> str:
     try:
         d = pd.to_datetime(v, errors="coerce")
@@ -209,47 +231,30 @@ def _senado_inteiro_teor(codigo_materia):
     return _senado_inteiro_teor_page(codigo_materia)
 
 def _senado_primeira_autoria_da_pagina(codigo_materia) -> str | None:
-    """
-    Abre o Link Página e retorna o conteúdo da PRIMEIRA linha 'Autoria:'.
-    Estrutura típica: div.bg-info-conteudo > .row > div.span12.sf-bloco-paragrafos-condensados > <p><strong>Autoria:</strong><span>...</span></p>
-    """
     url = f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo_materia}"
     try:
         r = requests.get(url, timeout=45, headers=HDR)
         if r.status_code != 200:
             return None
         soup = BeautifulSoup(r.text, "html.parser")
-
-        # procurar no bloco mais específico; se não existir, procurar no documento inteiro
-        holders = soup.select("div.span12.sf-bloco-paragrafos-condensados")
-        if not holders:
-            holders = soup.select("div.bg-info-conteudo")
-        if not holders:
-            holders = [soup]
-
+        holders = soup.select("div.span12.sf-bloco-paragrafos-condensados") or soup.select("div.bg-info-conteudo") or [soup]
         for holder in holders:
             for p in holder.find_all("p"):
                 strong = p.find("strong")
-                if not strong:
-                    continue
+                if not strong: continue
                 label = _normalize(strong.get_text(" ", strip=True).rstrip(":"))
                 if label == "autoria":
-                    # método 1: usar o span logo após
                     span = p.find("span")
                     if span:
                         val = span.get_text(" ", strip=True)
-                        if val:
-                            return val
-                    # método 2: texto do <p> removendo o prefixo 'Autoria:'
+                        if val: return val
                     full = p.get_text(" ", strip=True)
                     val = re.sub(r'(?i)^\s*autoria\s*:\s*', "", full).strip()
-                    if val:
-                        return val
+                    if val: return val
         return None
     except Exception:
         return None
 
-# Regex para extrair (PARTIDO/UF) se vier como "Nome (PARTIDO/UF)"
 _rx_autor_chunk = re.compile(r"""\s*
     (?P<nome>.+?)
     (?:\s*\(\s*(?P<partido>[A-ZÀ-Ü\-]+)\s*/\s*(?P<uf>[A-Z]{2})\s*\))?
@@ -269,9 +274,7 @@ def _parse_autores_senado_texto(autor_str: str):
     for ch in chunks:
         m = _rx_autor_chunk.match(ch)
         if m:
-            nomes.append(m.group('nome'))
-            partidos.append(m.group('partido'))
-            ufs.append(m.group('uf'))
+            nomes.append(m.group('nome')); partidos.append(m.group('partido')); ufs.append(m.group('uf'))
         else:
             nomes.append(ch); partidos.append(None); ufs.append(None)
     return nomes, partidos, ufs
@@ -288,7 +291,8 @@ def senado_df_hoje() -> pd.DataFrame:
 
     rows = []
     for m in materias:
-        if not isinstance(m, dict): continue
+        if not isinstance(m, dict): 
+            continue
         dados = m.get("DadosBasicosMateria", {}) if isinstance(m.get("DadosBasicosMateria"), dict) else {}
         ident = m.get("IdentificacaoMateria", {}) if isinstance(m.get("IdentificacaoMateria"), dict) else {}
 
@@ -300,7 +304,7 @@ def senado_df_hoje() -> pd.DataFrame:
         data   = _get(m, "Data")   or _get(dados, "DataApresentacao") or _get(m, "DataApresentacao")
         ementa = (_get(m, "Ementa") or _get(dados, "EmentaMateria") or _get(m, "EmentaMateria") or "")
 
-        # Autoria (API)
+        # ---- autores (API estruturada) ----
         autor_str = _get(m, "Autor")
         nomes, partidos, ufs = [], [], []
         for bloco in ("Autoria","Autores"):
@@ -309,7 +313,8 @@ def senado_df_hoje() -> pd.DataFrame:
                 alist = b.get("Autor")
                 alist = alist if isinstance(alist, list) else [alist]
                 for a in alist or []:
-                    if not isinstance(a, dict): continue
+                    if not isinstance(a, dict): 
+                        continue
                     nome = a.get("NomeAutor") or a.get("NomeParlamentar")
                     partido = (a.get("SiglaPartidoAutor") or a.get("SiglaPartido")
                                or a.get("PartidoAutor") or a.get("Partido"))
@@ -318,21 +323,28 @@ def senado_df_hoje() -> pd.DataFrame:
                     partidos.append(partido if partido else None)
                     ufs.append(uf if uf else None)
 
-        # >>> Caso especial: Autor == "Câmara dos Deputados" -> pegar PRIMEIRA 'Autoria:' da página
+        # Caso especial: quando a API diz "Câmara dos Deputados", ler página
         if _normalize(autor_str) == _normalize("Câmara dos Deputados"):
             autor_page = _senado_primeira_autoria_da_pagina(codigo)
             if autor_page:
                 autor_str = autor_page
-                # tenta extrair partido/UF (quando aplicável)
-                n2, p2, u2 = _parse_autores_senado_texto(autor_page)
-                if n2 and not nomes: nomes = n2
-                if not any(partidos): partidos = p2
-                if not any(ufs): ufs = u2
 
-        if not autor_str and nomes:
-            autor_str = ", ".join(nomes)
+        # >>> SEMPRE tentar decompor a string de autores (ex.: "Senador X (PL/RJ); Senadora Y (PT/CE)")
+        if autor_str:
+            n2, p2, u2 = _parse_autores_senado_texto(autor_str)
+            if n2 and not nomes: 
+                nomes = n2
+            if any(p2) and not any(partidos): 
+                partidos = p2
+            if any(u2) and not any(ufs): 
+                ufs = u2
+
+        autor_final      = _join_unique(nomes) if nomes else (autor_str or "")
+        autor_partidos_s = _join_unique(partidos)
+        autor_ufs_s      = _join_unique(ufs)
 
         it_url, _ = _senado_inteiro_teor(codigo)
+        kw_str, clientes_str, temas_str = _extract_kw_client_theme(ementa)
 
         rows.append({
             "UID": f"Senado:{codigo}",
@@ -340,10 +352,12 @@ def senado_df_hoje() -> pd.DataFrame:
             "Sigla": sigla, "Número": numero, "Ano": ano,
             "Data Apresentação": _fmt_date(data),
             "Ementa": ementa,
-            "Palavras Chave": _extract_keywords(ementa),
-            "Autor": autor_str or "",
-            "Autor Partidos": ", ".join([p for p in partidos if p]) if any(partidos) else "",
-            "Autor UFs": ", ".join([u for u in ufs if u]) if any(ufs) else "",
+            "Palavras Chave": kw_str,
+            "Clientes": clientes_str,
+            "Temas": temas_str,
+            "Autor": autor_final,
+            "Autor Partidos": autor_partidos_s,
+            "Autor UFs": autor_ufs_s,
             "Link Página": f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo}",
             "Inteiro Teor URL": it_url or "",
             "Ingest At": _fmt_dt(now_br()),
@@ -474,6 +488,8 @@ def camara_df_hoje() -> pd.DataFrame:
             it_url, _ = _camara_inteiro_teor(pid)
             ementa = d.get("ementa", "") or ""
 
+            kw_str, clientes_str, temas_str = _extract_kw_client_theme(ementa)
+
             rows.append({
                 "UID": f"Camara:{pid}",
                 "Casa Atual": "Camara",
@@ -482,7 +498,9 @@ def camara_df_hoje() -> pd.DataFrame:
                 "Ano": d.get("ano"),
                 "Data Apresentação": _fmt_date(data),
                 "Ementa": ementa,
-                "Palavras Chave": _extract_keywords(ementa),
+                "Palavras Chave": kw_str,
+                "Clientes": clientes_str,
+                "Temas": temas_str,
                 "Autor": autores.get("autor",""),
                 "Autor Partidos": autores.get("autor_partidos",""),
                 "Autor UFs": autores.get("autor_ufs",""),
@@ -503,15 +521,20 @@ def camara_df_hoje() -> pd.DataFrame:
 # =========================================================
 #                 APPEND no Google Sheets (dedupe)
 # =========================================================
-SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")
+SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")  # geral (Câmara/Senado)
 SHEET_SENADO   = os.environ.get("SHEET_SENADO", "Senado")
 SHEET_CAMARA   = os.environ.get("SHEET_CAMARA", "Camara")
+
+# nova planilha: abas por cliente
+SPREADSHEET_ID_CLIENTES = os.environ.get("SPREADSHEET_ID_CLIENTES")  # <- adicione como secret
+
 CREDENTIALS_JSON = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "credentials.json")
 
 NEEDED_COLUMNS = [
     "UID","Casa Atual",
     "Sigla","Número","Ano",
-    "Data Apresentação","Ementa","Palavras Chave",
+    "Data Apresentação","Ementa",
+    "Palavras Chave","Clientes","Temas",
     "Autor","Autor Partidos","Autor UFs",
     "Link Página","Inteiro Teor URL",
     "Ingest At",
@@ -531,25 +554,24 @@ def _ensure_header(ws, header):
         ws.resize(rows=max(2, ws.row_count), cols=len(header))
         ws.update('1:1', [header])
 
-def append_dedupe(df: pd.DataFrame, sheet_name: str):
+def _open_sheet(spreadsheet_id: str):
     import gspread
     from google.oauth2.service_account import Credentials
+    scopes = ["https://www.googleapis.com/auth/spreadsheets",
+              "https://www.googleapis.com/auth/drive"]
+    creds = Credentials.from_service_account_file(CREDENTIALS_JSON, scopes=scopes)
+    gc = gspread.authorize(creds)
+    return gc.open_by_key(spreadsheet_id)
 
+def append_dedupe(df: pd.DataFrame, sheet_name: str):
     if df is None or df.empty:
         print(f"[{sheet_name}] nenhum dado para enviar.")
         return
     if not SPREADSHEET_ID:
         print("SPREADSHEET_ID não definido; pulando envio ao Sheets.")
         return
-
-    scopes = ["https://www.googleapis.com/auth/spreadsheets",
-              "https://www.googleapis.com/auth/drive"]
-    creds = Credentials.from_service_account_file(CREDENTIALS_JSON, scopes=scopes)
-    gc = gspread.authorize(creds)
-    sh = gc.open_by_key(SPREADSHEET_ID)
-
+    sh = _open_sheet(SPREADSHEET_ID)
     df = _normalize_columns(df)
-
     try:
         ws = sh.worksheet(sheet_name)
         _ensure_header(ws, NEEDED_COLUMNS)
@@ -560,12 +582,58 @@ def append_dedupe(df: pd.DataFrame, sheet_name: str):
             return
         ws.append_rows(new_df.values.tolist(), value_input_option="USER_ENTERED")
         print(f"[{sheet_name}] adicionadas {len(new_df)} linhas novas.")
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=sheet_name, rows=str(max(100, len(df)+10)), cols=len(NEEDED_COLUMNS))
-        _ensure_header(ws, NEEDED_COLUMNS)
-        if not df.empty:
-            ws.append_rows(df.values.tolist(), value_input_option="USER_ENTERED")
-        print(f"[{sheet_name}] criada e preenchida com {len(df)} linhas.")
+    except Exception as e:
+        import gspread
+        if isinstance(e, gspread.WorksheetNotFound):  # type: ignore
+            ws = sh.add_worksheet(title=sheet_name, rows=str(max(100, len(df)+10)), cols=len(NEEDED_COLUMNS))
+            _ensure_header(ws, NEEDED_COLUMNS)
+            if not df.empty:
+                ws.append_rows(df.values.tolist(), value_input_option="USER_ENTERED")
+            print(f"[{sheet_name}] criada e preenchida com {len(df)} linhas.")
+        else:
+            raise
+
+def append_por_cliente(df_total: pd.DataFrame):
+    """Envia para a planilha SPREADSHEET_ID_CLIENTES, uma aba por cliente (sigla)."""
+    if not SPREADSHEET_ID_CLIENTES:
+        print("SPREADSHEET_ID_CLIENTES não definido; pulando planilha por cliente.")
+        return
+    if df_total is None or df_total.empty:
+        print("[clientes] nada a enviar.")
+        return
+
+    sh = _open_sheet(SPREADSHEET_ID_CLIENTES)
+    df_total = _normalize_columns(df_total)
+
+    all_clients = list(CLIENT_THEME.keys())
+
+    # regex segura para achar a sigla dentro de campo 'Clientes' separado por ';'
+    for client in all_clients:
+        mask = df_total["Clientes"].str.contains(rf'(^|;\s*){re.escape(client)}(\s*;|$)', case=False, na=False)
+        sub = df_total[mask].copy()
+        if sub.empty:
+            print(f"[{client}] sem linhas novas hoje.")
+            continue
+        sheet_name = client
+        try:
+            ws = sh.worksheet(sheet_name)
+            _ensure_header(ws, NEEDED_COLUMNS)
+            existing = set(ws.col_values(1)[1:])
+            new_df = sub[~sub["UID"].isin(existing)].copy()
+            if new_df.empty:
+                print(f"[{sheet_name}] nada novo para anexar.")
+                continue
+            ws.append_rows(new_df.values.tolist(), value_input_option="USER_ENTERED")
+            print(f"[{sheet_name}] adicionadas {len(new_df)} linhas novas.")
+        except Exception as e:
+            import gspread
+            if isinstance(e, gspread.WorksheetNotFound):  # type: ignore
+                ws = sh.add_worksheet(title=sheet_name, rows=str(max(100, len(sub)+10)), cols=len(NEEDED_COLUMNS))
+                _ensure_header(ws, NEEDED_COLUMNS)
+                ws.append_rows(sub.values.tolist(), value_input_option="USER_ENTERED")
+                print(f"[{sheet_name}] criada e preenchida com {len(sub)} linhas.")
+            else:
+                raise
 
 # =========================================================
 #                        MAIN
@@ -576,15 +644,22 @@ def main():
 
     print(f"Senado: {len(senado)} linhas | Câmara: {len(camara)} linhas")
 
-    if not SPREADSHEET_ID:
+    if not SPREADSHEET_ID and not SPREADSHEET_ID_CLIENTES:
         stamp = today_compact()
         senado.to_csv(f"senado_{stamp}.csv", index=False)
         camara.to_csv(f"camara_{stamp}.csv", index=False)
-        print("SPREADSHEET_ID não definido; arquivos CSV salvos.")
+        print("Sem IDs de planilha; arquivos CSV salvos.")
         return
 
-    append_dedupe(senado, SHEET_SENADO)
-    append_dedupe(camara, SHEET_CAMARA)
+    # 1) Planilha geral (se tiver ID)
+    if SPREADSHEET_ID:
+        append_dedupe(senado, SHEET_SENADO)
+        append_dedupe(camara, SHEET_CAMARA)
+
+    # 2) Planilha por cliente (Câmara + Senado combinados)
+    if SPREADSHEET_ID_CLIENTES:
+        total = pd.concat([senado, camara], ignore_index=True) if not senado.empty or not camara.empty else pd.DataFrame(columns=NEEDED_COLUMNS)
+        append_por_cliente(total)
 
 if __name__ == "__main__":
     main()
