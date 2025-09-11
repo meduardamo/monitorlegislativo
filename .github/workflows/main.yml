@@ -35,6 +35,7 @@ jobs:
       - name: Run collector
         env:
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          SPREADSHEET_ID_CLIENTES: ${{ secrets.SPREADSHEET_ID_CLIENTES }}
           SHEET_SENADO:  ${{ secrets.SHEET_SENADO }}
           SHEET_CAMARA:  ${{ secrets.SHEET_CAMARA }}
           GOOGLE_APPLICATION_CREDENTIALS: credentials.json
