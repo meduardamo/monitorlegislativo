@@ -6,3 +6,4 @@ gspread
 gspread_dataframe
 google-auth
 backports.zoneinfo; python_version<"3.9"
+certifi
