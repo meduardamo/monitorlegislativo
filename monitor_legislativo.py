@@ -94,7 +94,7 @@ def _get_senado(url, **kw):
         kw2 = dict(kw); kw2["verify"] = False
         return _sess.get(url, **kw2)
 
-# ====================== Mapa: Cliente → Tema → Keywords ======================
+# ====================== Mapa: Cliente → Tema → Keywords (whole-word) ======================
 CLIENT_THEME_DATA = """
 IAS|Educação|Matemática; Alfabetização; Alfabetização Matemática; Recomposição de aprendizagem; Plano Nacional de Educação
 ISG|Educação|Tempo Integral; Ensino em tempo integral; Ensino Profissional e Tecnológico; Fundeb; PROPAG; Educação em tempo integral; Escola em tempo integral; Plano Nacional de Educação; Programa escola em tempo integral; Programa Pé-de-meia; PNEERQ; INEP; FNDE; Conselho Nacional de Educação; PDDE; Programa de Fomento às Escolas de Ensino Médio em Tempo Integral; Celular nas escolas; Juros da Educação
@@ -110,46 +110,58 @@ Cactus|Saúde|Saúde mental; saúde mental para meninas; saúde mental para juve
 Vital Strategies|Saúde|Saúde mental; Dados para a saúde; Morte evitável; Doenças crônicas não transmissíveis; Rotulagem de bebidas alcoólicas; Educação em saúde; Bebidas alcoólicas; Imposto seletivo; Rotulagem de alimentos; Alimentos ultraprocessados; Publicidade infantil; Publicidade de alimentos ultraprocessados; Tributação de bebidas alcoólicas; Alíquota de bebidas alcoólicas; Cigarro eletrônico; Controle de tabaco; Violência doméstica; Exposição a fatores de risco; Departamento de Saúde Mental; Hipertensão arterial; Saúde digital; Violência contra crianças; Violência contra mulheres; Feminicídio; COP 30
 """.strip()
 
+def _normalize_ws(s: str) -> str:
+    # normaliza, remove acento, deixa minúsculo e troca tudo que não é [a-z0-9] por espaço
+    s = _normalize(s)
+    return re.sub(r'[^a-z0-9]+', ' ', s).strip()
+
+def _kw_tokens(kw: str) -> list[str]:
+    return [t for t in _normalize_ws(kw).split() if t]
+
+def _compile_kw_pattern(kw: str):
+    toks = _kw_tokens(kw)
+    if not toks: 
+        return None
+    # \b termo \b com \s+ entre tokens => exige palavra inteira/frase inteira
+    patt = r'\b' + r'\s+'.join(map(re.escape, toks)) + r'\b'
+    return re.compile(patt)
+
 def _parse_client_theme_data(text: str):
     client_theme: dict[str, dict[str, list[str]]] = {}
     for raw in text.splitlines():
-        if not raw.strip(): 
+        if not raw.strip():
             continue
         cliente, tema, kws = [x.strip() for x in raw.split("|", 2)]
         kw_list = [k.strip() for k in kws.split(";") if k.strip()]
         client_theme.setdefault(cliente, {}).setdefault(tema, [])
-        client_theme[cliente][tema].extend(kw_list)
-    # dedupe/normalizar por tema
-    for c in client_theme:
-        for t in client_theme[c]:
-            seen = set(); cleaned = []
-            for k in client_theme[c][t]:
-                kk = _normalize(k)
-                if kk not in seen:
-                    seen.add(kk); cleaned.append(k)
-            client_theme[c][t] = cleaned
-    # índice por palavra
-    kw_index: dict[str, set[tuple[str,str,str]]] = {}
-    for c, temas in client_theme.items():
-        for t, kws in temas.items():
-            for k in kws:
-                nk = _normalize(k)
-                if not nk: 
-                    continue
-                kw_index.setdefault(nk, set()).add((c, t, k))
-    return client_theme, kw_index
+        # dedupe simples preservando ordem
+        seen = set()
+        for k in kw_list:
+            key = _normalize_ws(k)
+            if key and key not in seen:
+                seen.add(key)
+                client_theme[cliente][tema].append(k)
+    return client_theme
 
-CLIENT_THEME, KEYWORD_INDEX = _parse_client_theme_data(CLIENT_THEME_DATA)
+CLIENT_THEME = _parse_client_theme_data(CLIENT_THEME_DATA)
+
+# Pré-compila padrões (melhor performance e consistência de match)
+KW_PATTERNS: list[tuple[re.Pattern, str, str, str]] = []
+for cliente, temas in CLIENT_THEME.items():
+    for tema, kws in temas.items():
+        for kw in kws:
+            pat = _compile_kw_pattern(kw)
+            if pat:
+                KW_PATTERNS.append((pat, cliente, tema, kw))
 
 def _extract_kw_client_theme(texto: str):
-    nt = _normalize(texto or "")
+    nt = _normalize_ws(texto or "")
     matched_kws = []
-    pairs = set()  # (cliente, tema)
-    for nk, buckets in KEYWORD_INDEX.items():
-        if nk and nk in nt:
-            for cliente, tema, original_kw in buckets:
-                matched_kws.append(original_kw)
-                pairs.add((cliente, tema))
+    pairs = set()
+    for pat, cliente, tema, original_kw in KW_PATTERNS:
+        if pat.search(nt):
+            matched_kws.append(original_kw)
+            pairs.add((cliente, tema))
     kw_str = "; ".join(dict.fromkeys(matched_kws).keys())
     clientes_str = "; ".join(sorted({c for c, _ in pairs}))
     temas_str = "; ".join(sorted({t for _, t in pairs}))
