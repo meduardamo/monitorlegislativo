@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# Monitor Legislativo – Geral + Abas por Cliente (Câmara + Senado)
-# Foco: novas proposições + autoria granular + match de keywords por palavra inteira.
+# Monitor Legislativo – Novas proposições (Câmara + Senado)
+# Keywords por palavra/frase inteira + autoria granular + abas por cliente
 
 import os, re, time, requests, pandas as pd, unicodedata
 from datetime import datetime
@@ -24,7 +24,6 @@ HDR = {
                   "(KHTML, like Gecko) Chrome/126 Safari/537.36"
 }
 
-# sessão com retries
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 _sess = requests.Session()
@@ -73,7 +72,6 @@ def _normalize(text: str) -> str:
     return t.lower().strip()
 
 def _normalize_ws(s: str) -> str:
-    # normaliza, remove acento, minúsculo e troca tudo que não é [a-z0-9] por espaço
     s = _normalize(s)
     return re.sub(r'[^a-z0-9]+', ' ', s).strip()
 
@@ -82,7 +80,6 @@ def _join_unique(seq):
 
 # ---------------------- GET helpers ----------------------
 def _get_default(url, **kw):
-    """GET padrão (Câmara, etc.)"""
     return _sess.get(url, **kw)
 
 def _get_senado(url, **kw):
@@ -394,9 +391,7 @@ def senado_df_hoje() -> pd.DataFrame:
             if any(u2) and not any(ufs): ufs = u2
 
         # granular
-        autor_final      = _join_unique(nomes) if nomes else (autor_str or "")
-        autor_partidos_s = _join_unique(partidos)
-        autor_ufs_s      = _join_unique(ufs)
+        autor_final_nomes = _join_unique(nomes) if nomes else (autor_str or "")
 
         if nomes:
             ap_nome = nomes[0]
@@ -430,10 +425,7 @@ def senado_df_hoje() -> pd.DataFrame:
             "Autor Principal Tipo": ap_tipo,
             "Coautores": coau,
             "Qtd Coautores": str(qtd_coaut),
-            # autoria agregada
-            "Autor": autor_final,
-            "Autor Partidos": autor_partidos_s,
-            "Autor UFs": autor_ufs_s,
+            # links / auditoria
             "Link Página": f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo}",
             "Inteiro Teor URL": it_url or "",
             "Ingest At": _fmt_dt(now_br()),
@@ -483,7 +475,7 @@ def _autores_camara_completo(prop_id:int) -> dict:
             nome = a.get("nome") or ""
             uri  = a.get("uri")
             tipo = (a.get("tipo") or a.get("tipoAutor") or a.get("tipoAssinatura") or "").strip()
-            ordem = a.get("ordemAssinatura") or a.get("ordem")  # pode não existir
+            ordem = a.get("ordemAssinatura") or a.get("ordem")
             dep_id = _last_int_from_uri(uri) if uri and "/deputados/" in uri else None
             partido, uf = _get_deputado_partido_uf(dep_id) if dep_id else (None, None)
             out.append({
@@ -497,23 +489,19 @@ def _autores_camara_completo(prop_id:int) -> dict:
     except Exception:
         pass
 
-    # escolher principal:
+    # escolher principal
     ap = None
-    # 1) quem tiver ordemAssinatura==1
     for a in out:
         if a.get("ordem") == 1:
             ap = a; break
-    # 2) senão, quem tiver tipo "Autor" (vs "Coautor")
     if not ap:
         for a in out:
             if re.search(r'(?i)\bautor\b', a.get("tipo","")) and not re.search(r'(?i)\bcoautor\b', a.get("tipo","")):
                 ap = a; break
-    # 3) senão, primeiro parlamentar (is_dep)
     if not ap:
         for a in out:
             if a.get("is_dep"):
                 ap = a; break
-    # 4) fallback: primeiro da lista
     if not ap and out:
         ap = out[0]
 
@@ -522,19 +510,10 @@ def _autores_camara_completo(prop_id:int) -> dict:
     autor_principal_uf = ap["uf"] if ap else ""
     autor_principal_tipo = "Parlamentar" if (ap and ap.get("is_dep")) else (_infer_tipo_autor(autor_principal) if autor_principal else "")
 
-    # coautores = todos os demais nomes
     coautores = ", ".join([a["nome"] for a in out if a.get("nome") and a is not ap])
     qtd_coaut = len([1 for a in out if a is not ap])
 
-    # agregados antigos
-    autor = ", ".join([a["nome"] for a in out if a.get("nome")])
-    autor_partidos = ", ".join([a["partido"] for a in out if a.get("partido")])
-    autor_ufs = ", ".join([a["uf"] for a in out if a.get("uf")])
-
     return {
-        "autor": autor,
-        "autor_partidos": autor_partidos,
-        "autor_ufs": autor_ufs,
         "ap_nome": autor_principal,
         "ap_partido": autor_principal_part,
         "ap_uf": autor_principal_uf,
@@ -626,14 +605,13 @@ def camara_df_hoje() -> pd.DataFrame:
                 "Autor Principal Tipo": autores.get("ap_tipo",""),
                 "Coautores": autores.get("coautores",""),
                 "Qtd Coautores": autores.get("qtd_coaut","0"),
-                # autoria agregada (compat)
-                "Autor": autores.get("autor",""),
-                "Autor Partidos": autores.get("autor_partidos",""),
-                "Autor UFs": autores.get("autor_ufs",""),
-                "Link Página": f"https://www.camara.leg.br/propostas-legislativas/{pid}",
+                # links / auditoria
+                "Link Página": f"https://www.camara.legislativa{'' if False else ''}".replace("legislativa","legislativa"),  # placeholder (ajuste abaixo)
                 "Inteiro Teor URL": it_url or "",
                 "Ingest At": _fmt_dt(now_br()),
             })
+            # corrigir link página: (mantido seu padrão)
+            rows[-1]["Link Página"] = f"https://www.camara.leg.br/propostas-legislativas/{pid}"
         next_link = next((lk for lk in j.get("links", []) if lk.get("rel")=="next"), None)
         if not next_link: break
         params["pagina"] += 1
@@ -664,8 +642,7 @@ NEEDED_COLUMNS = [
     # autoria granular
     "Autor Principal","Autor Principal Partido","Autor Principal UF","Autor Principal Tipo",
     "Coautores","Qtd Coautores",
-    # autoria agregada (compat)
-    "Autor","Autor Partidos","Autor UFs",
+    # links e auditoria
     "Link Página","Inteiro Teor URL",
     "Ingest At",
 ]
@@ -692,6 +669,24 @@ def _open_sheet(spreadsheet_id: str):
     creds = Credentials.from_service_account_file(CREDENTIALS_JSON, scopes=scopes)
     gc = gspread.authorize(creds)
     return gc.open_by_key(spreadsheet_id)
+
+def ensure_headers(spreadsheet_id: str, sheet_names: list[str]):
+    """Garante que cada aba exista e tenha o cabeçalho NEEDED_COLUMNS,
+    mesmo sem linhas novas no dia."""
+    if not spreadsheet_id or not sheet_names:
+        return
+    sh = _open_sheet(spreadsheet_id)
+    import gspread
+    for name in sheet_names:
+        try:
+            ws = sh.worksheet(name)
+            _ensure_header(ws, NEEDED_COLUMNS)
+        except Exception as e:
+            if isinstance(e, gspread.WorksheetNotFound):  # type: ignore
+                ws = sh.add_worksheet(title=name, rows="2", cols=len(NEEDED_COLUMNS))
+                _ensure_header(ws, NEEDED_COLUMNS)
+            else:
+                raise
 
 def append_dedupe(df: pd.DataFrame, sheet_name: str):
     if df is None or df.empty:
@@ -729,6 +724,9 @@ def append_por_cliente(df_total: pd.DataFrame):
     if not SPREADSHEET_ID_CLIENTES:
         print("SPREADSHEET_ID_CLIENTES não definido; pulando planilha por cliente.")
         return
+    # garante cabeçalhos de TODAS as abas de cliente, mesmo sem dados novos
+    ensure_headers(SPREADSHEET_ID_CLIENTES, list(CLIENT_THEME.keys()))
+
     if df_total is None or df_total.empty:
         print("[clientes] nada a enviar.")
         return
@@ -775,6 +773,12 @@ def main():
     camara = camara_df_hoje()
 
     print(f"Senado: {len(senado)} linhas | Câmara: {len(camara)} linhas")
+
+    # Força cabeçalhos nas planilhas/abas, mesmo sem dados novos
+    if SPREADSHEET_ID:
+        ensure_headers(SPREADSHEET_ID, [SHEET_SENADO, SHEET_CAMARA])
+    if SPREADSHEET_ID_CLIENTES:
+        ensure_headers(SPREADSHEET_ID_CLIENTES, list(CLIENT_THEME.keys()))
 
     if not SPREADSHEET_ID and not SPREADSHEET_ID_CLIENTES:
         stamp = today_compact()
