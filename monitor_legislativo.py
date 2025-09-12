@@ -78,6 +78,23 @@ def _normalize_ws(s: str) -> str:
 def _join_unique(seq):
     return ", ".join(dict.fromkeys([x for x in _as_list(seq) if x]))
 
+def _dedup_preserve(seq):
+    return list(dict.fromkeys([x for x in _as_list(seq) if x]))
+
+def _label_with_party_uf(nome: str|None, partido: str|None=None, uf: str|None=None) -> str:
+    nome = (nome or "").strip()
+    p = (partido or "").strip() if partido else ""
+    u = (uf or "").strip() if uf else ""
+    if not nome:
+        return ""
+    if p and u:
+        return f"{nome} ({p}/{u})"
+    if p:
+        return f"{nome} ({p})"
+    if u:
+        return f"{nome} ({u})"
+    return nome
+
 # ---------------------- GET helpers ----------------------
 def _get_default(url, **kw):
     return _sess.get(url, **kw)
@@ -390,21 +407,26 @@ def senado_df_hoje() -> pd.DataFrame:
             if any(p2) and not any(partidos): partidos = p2
             if any(u2) and not any(ufs): ufs = u2
 
-        # granular
-        autor_final_nomes = _join_unique(nomes) if nomes else (autor_str or "")
-
+        # granular + coautores "Nome (PARTIDO/UF)"
         if nomes:
             ap_nome = nomes[0]
             ap_part = partidos[0] if len(partidos) else None
             ap_uf   = ufs[0] if len(ufs) else None
-            coau    = ", ".join([n for n in nomes[1:] if n])
+            co_list = []
+            for i in range(1, len(nomes)):
+                p = partidos[i] if i < len(partidos) else None
+                u = ufs[i] if i < len(ufs) else None
+                co_list.append(_label_with_party_uf(nomes[i], p, u))
+            co_list = _dedup_preserve([x for x in co_list if x])
+            coau = ", ".join(co_list)
+            qtd_coaut = len(co_list)
         else:
             ap_nome = autor_str or ""
             ap_part = None
             ap_uf   = None
             coau    = ""
+            qtd_coaut = 0
         ap_tipo = _infer_tipo_autor(ap_nome)
-        qtd_coaut = max(0, (len(nomes) - 1)) if nomes else 0
 
         it_url, _ = _senado_inteiro_teor(codigo)
         kw_str, clientes_str, temas_str = _extract_kw_client_theme(ementa)
@@ -510,8 +532,13 @@ def _autores_camara_completo(prop_id:int) -> dict:
     autor_principal_uf = ap["uf"] if ap else ""
     autor_principal_tipo = "Parlamentar" if (ap and ap.get("is_dep")) else (_infer_tipo_autor(autor_principal) if autor_principal else "")
 
-    coautores = ", ".join([a["nome"] for a in out if a.get("nome") and a is not ap])
-    qtd_coaut = len([1 for a in out if a is not ap])
+    # coautores como "Nome (PARTIDO/UF)"
+    co_labels = _dedup_preserve([
+        _label_with_party_uf(a["nome"], a.get("partido"), a.get("uf"))
+        for a in out if a is not ap and a.get("nome")
+    ])
+    coautores = ", ".join(co_labels)
+    qtd_coaut = len(co_labels)
 
     return {
         "ap_nome": autor_principal,
@@ -606,12 +633,10 @@ def camara_df_hoje() -> pd.DataFrame:
                 "Coautores": autores.get("coautores",""),
                 "Qtd Coautores": autores.get("qtd_coaut","0"),
                 # links / auditoria
-                "Link Página": f"https://www.camara.legislativa{'' if False else ''}".replace("legislativa","legislativa"),  # placeholder (ajuste abaixo)
+                "Link Página": f"https://www.camara.leg.br/propostas-legislativas/{pid}",
                 "Inteiro Teor URL": it_url or "",
                 "Ingest At": _fmt_dt(now_br()),
             })
-            # corrigir link página: (mantido seu padrão)
-            rows[-1]["Link Página"] = f"https://www.camara.leg.br/propostas-legislativas/{pid}"
         next_link = next((lk for lk in j.get("links", []) if lk.get("rel")=="next"), None)
         if not next_link: break
         params["pagina"] += 1
