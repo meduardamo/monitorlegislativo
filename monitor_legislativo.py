@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
-# Monitor Legislativo – Novas proposições (Câmara + Senado)
-# Keywords por palavra/frase inteira + autoria granular + abas por cliente
+# Monitor Legislativo – Última semana (ou intervalo customizado)
+# - Câmara + Senado
+# - Keywords por palavra/frase inteira (sem acentos)
+# - Autoria granular (Autor Principal + Coautores)
+# - Envia para planilha geral (abas Camara/Senado) e para planilha por cliente (uma aba por cliente)
 
-import os, re, time, requests, pandas as pd, unicodedata
-from datetime import datetime
+import os, re, time, argparse, requests, pandas as pd, unicodedata
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 # ====================== Timezone BR ======================
@@ -14,8 +17,6 @@ except Exception:  # py<3.9
 
 TZ_BR = ZoneInfo("America/Sao_Paulo")
 now_br = lambda: datetime.now(TZ_BR)
-today_iso = lambda: now_br().date().strftime("%Y-%m-%d")
-today_compact = lambda: now_br().date().strftime("%Y%m%d")
 
 # ====================== HTTP ======================
 HDR = {
@@ -195,7 +196,7 @@ def _infer_tipo_autor(nome: str|None) -> str:
     return "Parlamentar"
 
 # =========================================================
-#                       SENADO
+#                       SENADO (por período)
 # =========================================================
 from bs4 import BeautifulSoup
 BASE_PESQUISA_SF = "https://legis.senado.leg.br/dadosabertos/materia/pesquisa/lista.json"
@@ -335,8 +336,13 @@ def _senado_primeira_autoria_da_pagina(codigo_materia) -> str | None:
     except Exception:
         return None
 
-def senado_df_hoje() -> pd.DataFrame:
-    params = {"dataInicioApresentacao": today_compact(), "dataFimApresentacao": today_compact()}
+def senado_df_periodo(dt_ini_iso: str, dt_fim_iso: str) -> pd.DataFrame:
+    # Senado espera AAAAMMDD
+    def _to_compact(s):
+        d = pd.to_datetime(s, errors="coerce")
+        return d.strftime("%Y%m%d") if pd.notna(d) else ""
+    params = {"dataInicioApresentacao": _to_compact(dt_ini_iso),
+              "dataFimApresentacao": _to_compact(dt_fim_iso)}
     r = _get_senado(BASE_PESQUISA_SF, params=params, timeout=60); r.raise_for_status()
     j = r.json()
     materias = (_dig(j, ("PesquisaBasicaMateria","Materias","Materia"))
@@ -390,9 +396,6 @@ def senado_df_hoje() -> pd.DataFrame:
             if any(p2) and not any(partidos): partidos = p2
             if any(u2) and not any(ufs): ufs = u2
 
-        # granular
-        autor_final_nomes = _join_unique(nomes) if nomes else (autor_str or "")
-
         if nomes:
             ap_nome = nomes[0]
             ap_part = partidos[0] if len(partidos) else None
@@ -418,14 +421,12 @@ def senado_df_hoje() -> pd.DataFrame:
             "Palavras Chave": kw_str,
             "Clientes": clientes_str,
             "Temas": temas_str,
-            # autoria granular
             "Autor Principal": ap_nome,
             "Autor Principal Partido": ap_part or "",
             "Autor Principal UF": ap_uf or "",
             "Autor Principal Tipo": ap_tipo,
             "Coautores": coau,
             "Qtd Coautores": str(qtd_coaut),
-            # links / auditoria
             "Link Página": f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo}",
             "Inteiro Teor URL": it_url or "",
             "Ingest At": _fmt_dt(now_br()),
@@ -437,7 +438,7 @@ def senado_df_hoje() -> pd.DataFrame:
     return df
 
 # =========================================================
-#                       CÂMARA
+#                       CÂMARA (por período)
 # =========================================================
 BASE_CAMARA = "https://dadosabertos.camara.leg.br/api/v2/proposicoes"
 BASE_DEP    = "https://dadosabertos.camara.leg.br/api/v2/deputados"
@@ -489,7 +490,6 @@ def _autores_camara_completo(prop_id:int) -> dict:
     except Exception:
         pass
 
-    # escolher principal
     ap = None
     for a in out:
         if a.get("ordem") == 1:
@@ -561,9 +561,9 @@ def _camara_inteiro_teor(prop_id:int):
         pass
     return None, None
 
-def camara_df_hoje() -> pd.DataFrame:
-    params = {"dataApresentacaoInicio": today_iso(),
-              "dataApresentacaoFim": today_iso(),
+def camara_df_periodo(dt_ini_iso: str, dt_fim_iso: str) -> pd.DataFrame:
+    params = {"dataApresentacaoInicio": dt_ini_iso,
+              "dataApresentacaoFim": dt_fim_iso,
               "ordem":"DESC","ordenarPor":"id","itens":100,"pagina":1}
     rows = []
     while True:
@@ -598,20 +598,16 @@ def camara_df_hoje() -> pd.DataFrame:
                 "Palavras Chave": kw_str,
                 "Clientes": clientes_str,
                 "Temas": temas_str,
-                # autoria granular
                 "Autor Principal": autores.get("ap_nome",""),
                 "Autor Principal Partido": autores.get("ap_partido",""),
                 "Autor Principal UF": autores.get("ap_uf",""),
                 "Autor Principal Tipo": autores.get("ap_tipo",""),
                 "Coautores": autores.get("coautores",""),
                 "Qtd Coautores": autores.get("qtd_coaut","0"),
-                # links / auditoria
-                "Link Página": f"https://www.camara.legislativa{'' if False else ''}".replace("legislativa","legislativa"),  # placeholder (ajuste abaixo)
+                "Link Página": f"https://www.camara.leg.br/propostas-legislativas/{pid}",
                 "Inteiro Teor URL": it_url or "",
                 "Ingest At": _fmt_dt(now_br()),
             })
-            # corrigir link página: (mantido seu padrão)
-            rows[-1]["Link Página"] = f"https://www.camara.leg.br/propostas-legislativas/{pid}"
         next_link = next((lk for lk in j.get("links", []) if lk.get("rel")=="next"), None)
         if not next_link: break
         params["pagina"] += 1
@@ -639,10 +635,8 @@ NEEDED_COLUMNS = [
     "Sigla","Número","Ano",
     "Data Apresentação","Ementa",
     "Palavras Chave","Clientes","Temas",
-    # autoria granular
     "Autor Principal","Autor Principal Partido","Autor Principal UF","Autor Principal Tipo",
     "Coautores","Qtd Coautores",
-    # links e auditoria
     "Link Página","Inteiro Teor URL",
     "Ingest At",
 ]
@@ -724,7 +718,6 @@ def append_por_cliente(df_total: pd.DataFrame):
     if not SPREADSHEET_ID_CLIENTES:
         print("SPREADSHEET_ID_CLIENTES não definido; pulando planilha por cliente.")
         return
-    # garante cabeçalhos de TODAS as abas de cliente, mesmo sem dados novos
     ensure_headers(SPREADSHEET_ID_CLIENTES, list(CLIENT_THEME.keys()))
 
     if df_total is None or df_total.empty:
@@ -742,7 +735,7 @@ def append_por_cliente(df_total: pd.DataFrame):
         sub = df_total[mask].copy()
         sheet_name = client
         if sub.empty:
-            print(f"[{sheet_name}] sem linhas novas hoje.")
+            print(f"[{sheet_name}] sem linhas novas no período.")
             continue
         try:
             import gspread
@@ -766,11 +759,36 @@ def append_por_cliente(df_total: pd.DataFrame):
                 raise
 
 # =========================================================
-#                        MAIN
+#                        MAIN (última semana)
 # =========================================================
+def _resolve_period(args):
+    end = pd.to_datetime(args.end or now_br().date(), errors="coerce")
+    if pd.isna(end):
+        end = pd.to_datetime(now_br().date())
+    if args.start:
+        start = pd.to_datetime(args.start, errors="coerce")
+    else:
+        # padrão: última semana (7 dias corridos incluindo hoje)
+        start = end - pd.Timedelta(days=(args.days - 1))
+    if pd.isna(start):
+        start = end - pd.Timedelta(days=6)
+    # normaliza como strings ISO
+    start_iso = start.strftime("%Y-%m-%d")
+    end_iso   = end.strftime("%Y-%m-%d")
+    return start_iso, end_iso
+
 def main():
-    senado = senado_df_hoje()
-    camara = camara_df_hoje()
+    parser = argparse.ArgumentParser(description="Raspa proposições por período (padrão: última semana).")
+    parser.add_argument("--start", help="Data inicial (YYYY-MM-DD).")
+    parser.add_argument("--end",   help="Data final (YYYY-MM-DD).")
+    parser.add_argument("--days",  type=int, default=7, help="Tamanho da janela em dias quando --start não for passado (default=7).")
+    args = parser.parse_args()
+
+    dt_ini_iso, dt_fim_iso = _resolve_period(args)
+    print(f"Período: {dt_ini_iso} a {dt_fim_iso}")
+
+    senado = senado_df_periodo(dt_ini_iso, dt_fim_iso)
+    camara = camara_df_periodo(dt_ini_iso, dt_fim_iso)
 
     print(f"Senado: {len(senado)} linhas | Câmara: {len(camara)} linhas")
 
@@ -781,7 +799,8 @@ def main():
         ensure_headers(SPREADSHEET_ID_CLIENTES, list(CLIENT_THEME.keys()))
 
     if not SPREADSHEET_ID and not SPREADSHEET_ID_CLIENTES:
-        stamp = today_compact()
+        # salva CSVs locais para conferência
+        stamp = f"{dt_ini_iso}_a_{dt_fim_iso}".replace("-", "")
         senado.to_csv(f"senado_{stamp}.csv", index=False)
         camara.to_csv(f"camara_{stamp}.csv", index=False)
         print("Sem IDs de planilha; arquivos CSV salvos.")
