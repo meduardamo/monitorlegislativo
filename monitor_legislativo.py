@@ -24,6 +24,22 @@ HDR = {
                   "(KHTML, like Gecko) Chrome/126 Safari/537.36"
 }
 
+# sessão com retries
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+_sess = requests.Session()
+_retry = Retry(total=3, backoff_factor=0.3, status_forcelist=(500, 502, 503, 504))
+_sess.headers.update(HDR)
+_sess.mount("https://", HTTPAdapter(max_retries=_retry))
+_sess.mount("http://",  HTTPAdapter(max_retries=_retry))
+
+# suprimir warning se cair no fallback verify=False
+try:
+    from urllib3.exceptions import InsecureRequestWarning
+    requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)  # type: ignore
+except Exception:
+    pass
+
 def _as_list(x):
     if x is None: return []
     return x if isinstance(x, list) else [x]
@@ -59,6 +75,25 @@ def _normalize(text: str) -> str:
 def _join_unique(seq):
     return ", ".join(dict.fromkeys([x for x in _as_list(seq) if x]))
 
+# ---------------------- GET helpers ----------------------
+def _get_default(url, **kw):
+    """GET padrão (Câmara, etc.)"""
+    return _sess.get(url, **kw)
+
+def _get_senado(url, **kw):
+    """
+    GET p/ Senado com fallback de SSL:
+    - tenta com verificação normal
+    - se der SSLError, repete com verify=False (controlável pela env SENADO_INSECURE_FALLBACK=0 para desativar)
+    """
+    try:
+        return _sess.get(url, **kw)
+    except requests.exceptions.SSLError:
+        if os.getenv("SENADO_INSECURE_FALLBACK", "1") != "1":
+            raise
+        kw2 = dict(kw); kw2["verify"] = False
+        return _sess.get(url, **kw2)
+
 # ====================== Mapa: Cliente → Tema → Keywords ======================
 CLIENT_THEME_DATA = """
 IAS|Educação|Matemática; Alfabetização; Alfabetização Matemática; Recomposição de aprendizagem; Plano Nacional de Educação
@@ -87,8 +122,7 @@ def _parse_client_theme_data(text: str):
     # dedupe/normalizar por tema
     for c in client_theme:
         for t in client_theme[c]:
-            seen = set()
-            cleaned = []
+            seen = set(); cleaned = []
             for k in client_theme[c][t]:
                 kk = _normalize(k)
                 if kk not in seen:
@@ -156,7 +190,7 @@ def _senado_textos_api(codigo_materia):
     ]
     for u in tries:
         try:
-            r = requests.get(u, timeout=30, headers=HDR)
+            r = _get_senado(u, timeout=30)
             if r.status_code != 200:
                 continue
             j = r.json()
@@ -207,7 +241,7 @@ def _senado_inteiro_teor_api(codigo_materia):
 def _senado_inteiro_teor_page(codigo_materia):
     page = f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo_materia}"
     try:
-        r = requests.get(page, timeout=40, headers=HDR)
+        r = _get_senado(page, timeout=40)
         if r.status_code != 200:
             return None, None
         soup = BeautifulSoup(r.text, "html.parser")
@@ -251,9 +285,7 @@ def _parse_autores_senado_texto(autor_str: str):
     for ch in chunks:
         m = _rx_autor_chunk.match(ch)
         if m:
-            nomes.append(m.group('nome'))
-            partidos.append(m.group('partido'))
-            ufs.append(m.group('uf'))
+            nomes.append(m.group('nome')); partidos.append(m.group('partido')); ufs.append(m.group('uf'))
         else:
             nomes.append(ch); partidos.append(None); ufs.append(None)
     return nomes, partidos, ufs
@@ -261,7 +293,7 @@ def _parse_autores_senado_texto(autor_str: str):
 def _senado_primeira_autoria_da_pagina(codigo_materia) -> str | None:
     url = f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo_materia}"
     try:
-        r = requests.get(url, timeout=45, headers=HDR)
+        r = _get_senado(url, timeout=45)
         if r.status_code != 200:
             return None
         soup = BeautifulSoup(r.text, "html.parser")
@@ -269,8 +301,7 @@ def _senado_primeira_autoria_da_pagina(codigo_materia) -> str | None:
         for holder in holders:
             for p in holder.find_all("p"):
                 strong = p.find("strong")
-                if not strong: 
-                    continue
+                if not strong: continue
                 label = _normalize(strong.get_text(" ", strip=True).rstrip(":"))
                 if label == "autoria":
                     span = p.find("span")
@@ -286,7 +317,7 @@ def _senado_primeira_autoria_da_pagina(codigo_materia) -> str | None:
 
 def senado_df_hoje() -> pd.DataFrame:
     params = {"dataInicioApresentacao": today_compact(), "dataFimApresentacao": today_compact()}
-    r = requests.get(BASE_PESQUISA_SF, params=params, timeout=60, headers=HDR); r.raise_for_status()
+    r = _get_senado(BASE_PESQUISA_SF, params=params, timeout=60); r.raise_for_status()
     j = r.json()
     materias = (_dig(j, ("PesquisaBasicaMateria","Materias","Materia"))
                 or _dig(j, ("PesquisaBasicaMateria","Materia"))
@@ -309,7 +340,7 @@ def senado_df_hoje() -> pd.DataFrame:
         data   = _get(m, "Data")   or _get(dados, "DataApresentacao") or _get(m, "DataApresentacao")
         ementa = (_get(m, "Ementa") or _get(dados, "EmentaMateria") or _get(m, "EmentaMateria") or "")
 
-        # ---- autores (API estruturada) ----
+        # ---- autores (API + fallback texto) ----
         autor_str = _get(m, "Autor")
         nomes, partidos, ufs = [], [], []
         for bloco in ("Autoria","Autores"):
@@ -328,21 +359,16 @@ def senado_df_hoje() -> pd.DataFrame:
                     partidos.append(partido if partido else None)
                     ufs.append(uf if uf else None)
 
-        # quando a API disser "Câmara dos Deputados", ler a página e sobrescrever
         if _normalize(autor_str) == _normalize("Câmara dos Deputados"):
             autor_page = _senado_primeira_autoria_da_pagina(codigo)
             if autor_page:
                 autor_str = autor_page
 
-        # sempre tentar decompor a string de autores
         if autor_str:
             n2, p2, u2 = _parse_autores_senado_texto(autor_str)
-            if n2 and not nomes: 
-                nomes = n2
-            if any(p2) and not any(partidos): 
-                partidos = p2
-            if any(u2) and not any(ufs): 
-                ufs = u2
+            if n2 and not nomes: nomes = n2
+            if any(p2) and not any(partidos): partidos = p2
+            if any(u2) and not any(ufs): ufs = u2
 
         autor_final      = _join_unique(nomes) if nomes else (autor_str or "")
         autor_partidos_s = _join_unique(partidos)
@@ -393,7 +419,7 @@ def _parse_data_apresentacao_camara_text(v: str | None) -> str | None:
 def _get_deputado_partido_uf(dep_id: int):
     if not dep_id: return (None, None)
     try:
-        r = requests.get(f"{BASE_DEP}/{dep_id}", timeout=25, headers=HDR)
+        r = _get_default(f"{BASE_DEP}/{dep_id}", timeout=25)
         r.raise_for_status()
         dados = r.json().get("dados", {})
         status = dados.get("ultimoStatus", {}) if isinstance(dados.get("ultimoStatus"), dict) else {}
@@ -407,8 +433,7 @@ def _autores_camara_completo(prop_id:int) -> dict:
     out_nomes, out_partidos, out_ufs = [], [], []
     url = f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{prop_id}/autores"
     try:
-        r = requests.get(url, timeout=30, headers=HDR)
-        r.raise_for_status()
+        r = _get_default(url, timeout=30); r.raise_for_status()
         for a in r.json().get("dados", []):
             nome = a.get("nome")
             uri  = a.get("uri")
@@ -427,8 +452,7 @@ def _autores_camara_completo(prop_id:int) -> dict:
 
 def _camara_inteiro_teor(prop_id:int):
     try:
-        r = requests.get(f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{prop_id}",
-                         timeout=30, headers=HDR)
+        r = _get_default(f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{prop_id}", timeout=30)
         if r.status_code == 200:
             dados = r.json().get("dados", {})
             u = dados.get("urlInteiroTeor")
@@ -437,8 +461,7 @@ def _camara_inteiro_teor(prop_id:int):
     except Exception:
         pass
     try:
-        r = requests.get(f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{prop_id}/inteiroTeor",
-                         timeout=30, headers=HDR)
+        r = _get_default(f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{prop_id}/inteiroTeor", timeout=30)
         if r.status_code == 200:
             for d in _as_list(r.json().get("dados", [])):
                 u = d.get("url") or d.get("uri") or d.get("link")
@@ -448,8 +471,7 @@ def _camara_inteiro_teor(prop_id:int):
     except Exception:
         pass
     try:
-        r = requests.get(f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{prop_id}/documentos",
-                         timeout=30, headers=HDR)
+        r = _get_default(f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{prop_id}/documentos", timeout=30)
         if r.status_code == 200:
             docs = _as_list(r.json().get("dados", []))
             for d in docs:
@@ -473,15 +495,14 @@ def camara_df_hoje() -> pd.DataFrame:
               "ordem":"DESC","ordenarPor":"id","itens":100,"pagina":1}
     rows = []
     while True:
-        r = requests.get(BASE_CAMARA, params=params, timeout=60, headers=HDR); r.raise_for_status()
+        r = _get_default(BASE_CAMARA, params=params, timeout=60); r.raise_for_status()
         j = r.json()
         for d in j.get("dados", []):
             pid = d.get("id")
             data = _parse_data_apresentacao_camara_text(d.get("dataApresentacao"))
             if data is None:
                 try:
-                    r2 = requests.get(f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{pid}",
-                                      timeout=20, headers=HDR)
+                    r2 = _get_default(f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{pid}", timeout=20)
                     if r2.status_code == 200:
                         det = r2.json().get("dados", {})
                         data = (_parse_data_apresentacao_camara_text(det.get("dataApresentacao"))
