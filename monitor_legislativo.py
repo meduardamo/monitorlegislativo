@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Monitor Legislativo – Geral + Abas por Cliente (Câmara + Senado)
-# Requisitos: requests, pandas, bs4, gspread, google-auth
+# Foco: novas proposições + autoria granular + match de keywords por palavra inteira.
 
 import os, re, time, requests, pandas as pd, unicodedata
 from datetime import datetime
@@ -72,6 +72,11 @@ def _normalize(text: str) -> str:
     t = "".join(c for c in t if unicodedata.category(c) != "Mn")
     return t.lower().strip()
 
+def _normalize_ws(s: str) -> str:
+    # normaliza, remove acento, minúsculo e troca tudo que não é [a-z0-9] por espaço
+    s = _normalize(s)
+    return re.sub(r'[^a-z0-9]+', ' ', s).strip()
+
 def _join_unique(seq):
     return ", ".join(dict.fromkeys([x for x in _as_list(seq) if x]))
 
@@ -84,7 +89,7 @@ def _get_senado(url, **kw):
     """
     GET p/ Senado com fallback de SSL:
     - tenta com verificação normal
-    - se der SSLError, repete com verify=False (controlável pela env SENADO_INSECURE_FALLBACK=0 para desativar)
+    - se der SSLError, repete com verify=False (se SENADO_INSECURE_FALLBACK != '0')
     """
     try:
         return _sess.get(url, **kw)
@@ -110,19 +115,13 @@ Cactus|Saúde|Saúde mental; saúde mental para meninas; saúde mental para juve
 Vital Strategies|Saúde|Saúde mental; Dados para a saúde; Morte evitável; Doenças crônicas não transmissíveis; Rotulagem de bebidas alcoólicas; Educação em saúde; Bebidas alcoólicas; Imposto seletivo; Rotulagem de alimentos; Alimentos ultraprocessados; Publicidade infantil; Publicidade de alimentos ultraprocessados; Tributação de bebidas alcoólicas; Alíquota de bebidas alcoólicas; Cigarro eletrônico; Controle de tabaco; Violência doméstica; Exposição a fatores de risco; Departamento de Saúde Mental; Hipertensão arterial; Saúde digital; Violência contra crianças; Violência contra mulheres; Feminicídio; COP 30
 """.strip()
 
-def _normalize_ws(s: str) -> str:
-    # normaliza, remove acento, deixa minúsculo e troca tudo que não é [a-z0-9] por espaço
-    s = _normalize(s)
-    return re.sub(r'[^a-z0-9]+', ' ', s).strip()
-
 def _kw_tokens(kw: str) -> list[str]:
     return [t for t in _normalize_ws(kw).split() if t]
 
 def _compile_kw_pattern(kw: str):
     toks = _kw_tokens(kw)
-    if not toks: 
+    if not toks:
         return None
-    # \b termo \b com \s+ entre tokens => exige palavra inteira/frase inteira
     patt = r'\b' + r'\s+'.join(map(re.escape, toks)) + r'\b'
     return re.compile(patt)
 
@@ -134,18 +133,17 @@ def _parse_client_theme_data(text: str):
         cliente, tema, kws = [x.strip() for x in raw.split("|", 2)]
         kw_list = [k.strip() for k in kws.split(";") if k.strip()]
         client_theme.setdefault(cliente, {}).setdefault(tema, [])
-        # dedupe simples preservando ordem
         seen = set()
         for k in kw_list:
-            key = _normalize_ws(k)
-            if key and key not in seen:
-                seen.add(key)
+            kkey = _normalize_ws(k)
+            if kkey and kkey not in seen:
+                seen.add(kkey)
                 client_theme[cliente][tema].append(k)
     return client_theme
 
 CLIENT_THEME = _parse_client_theme_data(CLIENT_THEME_DATA)
 
-# Pré-compila padrões (melhor performance e consistência de match)
+# Pré-compila padrões para whole-word
 KW_PATTERNS: list[tuple[re.Pattern, str, str, str]] = []
 for cliente, temas in CLIENT_THEME.items():
     for tema, kws in temas.items():
@@ -187,6 +185,17 @@ def _fmt_dt(v) -> str:
             return v.strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             return ""
+
+# ====================== Heurística do tipo de autor ======================
+_rx_orgao = re.compile(r'(?i)\b(comissao|comissão|mesa|presid[eê]ncia|c[âa]mara dos deputados|senado federal|congresso|comit[eê]|subcomissao|subcomissão)\b')
+_rx_exec  = re.compile(r'(?i)\b(poder executivo|presid[eê]ncia da rep[úu]blica|minist[eé]rio|ministro|casa civil)\b')
+
+def _infer_tipo_autor(nome: str|None) -> str:
+    n = (nome or "").strip()
+    if not n: return ""
+    if _rx_orgao.search(n): return "Órgão/Comissão"
+    if _rx_exec.search(n):  return "Executivo"
+    return "Parlamentar"
 
 # =========================================================
 #                       SENADO
@@ -297,7 +306,9 @@ def _parse_autores_senado_texto(autor_str: str):
     for ch in chunks:
         m = _rx_autor_chunk.match(ch)
         if m:
-            nomes.append(m.group('nome')); partidos.append(m.group('partido')); ufs.append(m.group('uf'))
+            nomes.append(m.group('nome'))
+            partidos.append(m.group('partido'))
+            ufs.append(m.group('uf'))
         else:
             nomes.append(ch); partidos.append(None); ufs.append(None)
     return nomes, partidos, ufs
@@ -382,9 +393,23 @@ def senado_df_hoje() -> pd.DataFrame:
             if any(p2) and not any(partidos): partidos = p2
             if any(u2) and not any(ufs): ufs = u2
 
+        # granular
         autor_final      = _join_unique(nomes) if nomes else (autor_str or "")
         autor_partidos_s = _join_unique(partidos)
         autor_ufs_s      = _join_unique(ufs)
+
+        if nomes:
+            ap_nome = nomes[0]
+            ap_part = partidos[0] if len(partidos) else None
+            ap_uf   = ufs[0] if len(ufs) else None
+            coau    = ", ".join([n for n in nomes[1:] if n])
+        else:
+            ap_nome = autor_str or ""
+            ap_part = None
+            ap_uf   = None
+            coau    = ""
+        ap_tipo = _infer_tipo_autor(ap_nome)
+        qtd_coaut = max(0, (len(nomes) - 1)) if nomes else 0
 
         it_url, _ = _senado_inteiro_teor(codigo)
         kw_str, clientes_str, temas_str = _extract_kw_client_theme(ementa)
@@ -398,6 +423,14 @@ def senado_df_hoje() -> pd.DataFrame:
             "Palavras Chave": kw_str,
             "Clientes": clientes_str,
             "Temas": temas_str,
+            # autoria granular
+            "Autor Principal": ap_nome,
+            "Autor Principal Partido": ap_part or "",
+            "Autor Principal UF": ap_uf or "",
+            "Autor Principal Tipo": ap_tipo,
+            "Coautores": coau,
+            "Qtd Coautores": str(qtd_coaut),
+            # autoria agregada
             "Autor": autor_final,
             "Autor Partidos": autor_partidos_s,
             "Autor UFs": autor_ufs_s,
@@ -442,24 +475,72 @@ def _get_deputado_partido_uf(dep_id: int):
         return (None, None)
 
 def _autores_camara_completo(prop_id:int) -> dict:
-    out_nomes, out_partidos, out_ufs = [], [], []
+    out = []
     url = f"https://dadosabertos.camara.leg.br/api/v2/proposicoes/{prop_id}/autores"
     try:
         r = _get_default(url, timeout=30); r.raise_for_status()
         for a in r.json().get("dados", []):
-            nome = a.get("nome")
+            nome = a.get("nome") or ""
             uri  = a.get("uri")
+            tipo = (a.get("tipo") or a.get("tipoAutor") or a.get("tipoAssinatura") or "").strip()
+            ordem = a.get("ordemAssinatura") or a.get("ordem")  # pode não existir
             dep_id = _last_int_from_uri(uri) if uri and "/deputados/" in uri else None
             partido, uf = _get_deputado_partido_uf(dep_id) if dep_id else (None, None)
-            if nome: out_nomes.append(nome)
-            out_partidos.append(partido)
-            out_ufs.append(uf)
+            out.append({
+                "nome": nome,
+                "partido": partido or "",
+                "uf": uf or "",
+                "tipo": tipo,
+                "ordem": int(ordem) if isinstance(ordem, int) or (isinstance(ordem, str) and ordem.isdigit()) else None,
+                "is_dep": bool(dep_id),
+            })
     except Exception:
         pass
+
+    # escolher principal:
+    ap = None
+    # 1) quem tiver ordemAssinatura==1
+    for a in out:
+        if a.get("ordem") == 1:
+            ap = a; break
+    # 2) senão, quem tiver tipo "Autor" (vs "Coautor")
+    if not ap:
+        for a in out:
+            if re.search(r'(?i)\bautor\b', a.get("tipo","")) and not re.search(r'(?i)\bcoautor\b', a.get("tipo","")):
+                ap = a; break
+    # 3) senão, primeiro parlamentar (is_dep)
+    if not ap:
+        for a in out:
+            if a.get("is_dep"):
+                ap = a; break
+    # 4) fallback: primeiro da lista
+    if not ap and out:
+        ap = out[0]
+
+    autor_principal = ap["nome"] if ap else ""
+    autor_principal_part = ap["partido"] if ap else ""
+    autor_principal_uf = ap["uf"] if ap else ""
+    autor_principal_tipo = "Parlamentar" if (ap and ap.get("is_dep")) else (_infer_tipo_autor(autor_principal) if autor_principal else "")
+
+    # coautores = todos os demais nomes
+    coautores = ", ".join([a["nome"] for a in out if a.get("nome") and a is not ap])
+    qtd_coaut = len([1 for a in out if a is not ap])
+
+    # agregados antigos
+    autor = ", ".join([a["nome"] for a in out if a.get("nome")])
+    autor_partidos = ", ".join([a["partido"] for a in out if a.get("partido")])
+    autor_ufs = ", ".join([a["uf"] for a in out if a.get("uf")])
+
     return {
-        "autor": ", ".join(out_nomes) if out_nomes else "",
-        "autor_partidos": ", ".join([p for p in out_partidos if p]) if any(out_partidos) else "",
-        "autor_ufs": ", ".join([u for u in out_ufs if u]) if any(out_ufs) else "",
+        "autor": autor,
+        "autor_partidos": autor_partidos,
+        "autor_ufs": autor_ufs,
+        "ap_nome": autor_principal,
+        "ap_partido": autor_principal_part,
+        "ap_uf": autor_principal_uf,
+        "ap_tipo": autor_principal_tipo,
+        "coautores": coautores,
+        "qtd_coaut": str(qtd_coaut),
     }
 
 def _camara_inteiro_teor(prop_id:int):
@@ -525,7 +606,6 @@ def camara_df_hoje() -> pd.DataFrame:
             autores = _autores_camara_completo(pid)
             it_url, _ = _camara_inteiro_teor(pid)
             ementa = d.get("ementa", "") or ""
-
             kw_str, clientes_str, temas_str = _extract_kw_client_theme(ementa)
 
             rows.append({
@@ -539,6 +619,14 @@ def camara_df_hoje() -> pd.DataFrame:
                 "Palavras Chave": kw_str,
                 "Clientes": clientes_str,
                 "Temas": temas_str,
+                # autoria granular
+                "Autor Principal": autores.get("ap_nome",""),
+                "Autor Principal Partido": autores.get("ap_partido",""),
+                "Autor Principal UF": autores.get("ap_uf",""),
+                "Autor Principal Tipo": autores.get("ap_tipo",""),
+                "Coautores": autores.get("coautores",""),
+                "Qtd Coautores": autores.get("qtd_coaut","0"),
+                # autoria agregada (compat)
                 "Autor": autores.get("autor",""),
                 "Autor Partidos": autores.get("autor_partidos",""),
                 "Autor UFs": autores.get("autor_ufs",""),
@@ -573,6 +661,10 @@ NEEDED_COLUMNS = [
     "Sigla","Número","Ano",
     "Data Apresentação","Ementa",
     "Palavras Chave","Clientes","Temas",
+    # autoria granular
+    "Autor Principal","Autor Principal Partido","Autor Principal UF","Autor Principal Tipo",
+    "Coautores","Qtd Coautores",
+    # autoria agregada (compat)
     "Autor","Autor Partidos","Autor UFs",
     "Link Página","Inteiro Teor URL",
     "Ingest At",
