@@ -1,15 +1,10 @@
 # -*- coding: utf-8 -*-
 # Monitor Legislativo – Novas proposições (Câmara + Senado)
-# Versão simplificada: assumes all Sheets/tabs already exist with correct headers.
-# - Dedupe por UID (coluna A)
-# - INSERE novas linhas no topo (linha 2)
-# - Batch get para abas de clientes
-# - Retry/backoff leve para 429/5xx
+# Keywords por palavra/frase inteira + autoria granular + abas por cliente
 
 import os, re, time, requests, pandas as pd, unicodedata
 from datetime import datetime
 from urllib.parse import urlparse
-from bs4 import BeautifulSoup
 
 # ====================== Timezone BR ======================
 try:
@@ -28,6 +23,7 @@ HDR = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/126 Safari/537.36"
 }
+
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 _sess = requests.Session()
@@ -36,13 +32,13 @@ _sess.headers.update(HDR)
 _sess.mount("https://", HTTPAdapter(max_retries=_retry))
 _sess.mount("http://",  HTTPAdapter(max_retries=_retry))
 
+# suprimir warning se cair no fallback verify=False
 try:
     from urllib3.exceptions import InsecureRequestWarning
     requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)  # type: ignore
 except Exception:
     pass
 
-# ====================== Utils ======================
 def _as_list(x):
     if x is None: return []
     return x if isinstance(x, list) else [x]
@@ -104,6 +100,11 @@ def _get_default(url, **kw):
     return _sess.get(url, **kw)
 
 def _get_senado(url, **kw):
+    """
+    GET p/ Senado com fallback de SSL:
+    - tenta com verificação normal
+    - se der SSLError, repete com verify=False (se SENADO_INSECURE_FALLBACK != '0')
+    """
     try:
         return _sess.get(url, **kw)
     except requests.exceptions.SSLError:
@@ -112,7 +113,7 @@ def _get_senado(url, **kw):
         kw2 = dict(kw); kw2["verify"] = False
         return _sess.get(url, **kw2)
 
-# ====================== Mapa Cliente/Temas/Keywords ======================
+# ====================== Mapa: Cliente → Tema → Keywords (whole-word) ======================
 CLIENT_THEME_DATA = """
 IAS|Educação|Matemática; Alfabetização; Alfabetização Matemática; Recomposição de aprendizagem; Plano Nacional de Educação
 ISG|Educação|Tempo Integral; Ensino em tempo integral; Ensino Profissional e Tecnológico; Fundeb; PROPAG; Educação em tempo integral; Escola em tempo integral; Plano Nacional de Educação; Programa escola em tempo integral; Programa Pé-de-meia; PNEERQ; INEP; FNDE; Conselho Nacional de Educação; PDDE; Programa de Fomento às Escolas de Ensino Médio em Tempo Integral; Celular nas escolas; Juros da Educação
@@ -156,6 +157,7 @@ def _parse_client_theme_data(text: str):
 
 CLIENT_THEME = _parse_client_theme_data(CLIENT_THEME_DATA)
 
+# Pré-compila padrões para whole-word
 KW_PATTERNS: list[tuple[re.Pattern, str, str, str]] = []
 for cliente, temas in CLIENT_THEME.items():
     for tema, kws in temas.items():
@@ -177,7 +179,7 @@ def _extract_kw_client_theme(texto: str):
     temas_str = "; ".join(sorted({t for _, t in pairs}))
     return kw_str, clientes_str, temas_str
 
-# ====================== Date/Time fmt ======================
+# ====================== Helpers de DATA/HORA ======================
 def _fmt_date(v) -> str:
     try:
         d = pd.to_datetime(v, errors="coerce")
@@ -198,7 +200,7 @@ def _fmt_dt(v) -> str:
         except Exception:
             return ""
 
-# ====================== Autor heurística ======================
+# ====================== Heurística do tipo de autor ======================
 _rx_orgao = re.compile(r'(?i)\b(comissao|comissão|mesa|presid[eê]ncia|c[âa]mara dos deputados|senado federal|congresso|comit[eê]|subcomissao|subcomissão)\b')
 _rx_exec  = re.compile(r'(?i)\b(poder executivo|presid[eê]ncia da rep[úu]blica|minist[eé]rio|ministro|casa civil)\b')
 
@@ -209,7 +211,10 @@ def _infer_tipo_autor(nome: str|None) -> str:
     if _rx_exec.search(n):  return "Executivo"
     return "Parlamentar"
 
-# ====================== SENADO ======================
+# =========================================================
+#                       SENADO
+# =========================================================
+from bs4 import BeautifulSoup
 BASE_PESQUISA_SF = "https://legis.senado.leg.br/dadosabertos/materia/pesquisa/lista.json"
 
 def _senado_textos_api(codigo_materia):
@@ -268,27 +273,84 @@ def _senado_inteiro_teor_api(codigo_materia):
 
     return None, None
 
-def _senado_inteiro_teor(codigo_materia):
-    u, d = _senado_inteiro_teor_api(codigo_materia)
-    if u: return u, d
-    # fallback: página HTML
+def _senado_inteiro_teor_page(codigo_materia):
+    page = f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo_materia}"
     try:
-        page = f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo_materia}"
         r = _get_senado(page, timeout=40)
         if r.status_code != 200:
             return None, None
         soup = BeautifulSoup(r.text, "html.parser")
+
+        def pick_first(anchors):
+            for a in anchors:
+                href = (a.get("href") or "").strip()
+                if href.startswith("http") and ("sdleg-getter/documento" in href or href.lower().endswith(".pdf")):
+                    return href
+            return None
+
         anchors = soup.select("a.sf-texto-materia--link")
-        for a in anchors:
-            href = (a.get("href") or "").strip()
-            if href.startswith("http") and ("sdleg-getter/documento" in href or href.lower().endswith(".pdf")):
-                return href, None
-        a = soup.find("a")
-        if a and (a.get("href") or "").startswith("http"):
-            return a.get("href"), None
+        avulso = [a for a in anchors if "avulso inicial da matéria" in (a.get("title") or a.get_text("") or "").lower()]
+        u = pick_first(avulso) or pick_first(anchors) or pick_first(soup.find_all("a"))
+        return (u, None) if u else (None, None)
     except Exception:
-        pass
-    return None, None
+        return None, None
+
+def _senado_inteiro_teor(codigo_materia):
+    u, d = _senado_inteiro_teor_api(codigo_materia)
+    if u: return u, d
+    return _senado_inteiro_teor_page(codigo_materia)
+
+# Regex "Nome (PARTIDO/UF)" com vários autores separados por ';' ou por '), '
+_rx_autor_chunk = re.compile(r"""\s*
+    (?P<nome>.+?)
+    (?:\s*\(\s*(?P<partido>[A-ZÀ-Ü\-]+)\s*/\s*(?P<uf>[A-Z]{2})\s*\))?
+    \s*$""", re.X)
+
+def _parse_autores_senado_texto(autor_str: str):
+    if not autor_str:
+        return [], [], []
+    chunks = [c.strip() for c in re.split(r";", autor_str) if c and c.strip()]
+    if len(chunks) == 1:
+        if '), ' in autor_str:
+            parts = [p + (')' if not p.endswith(')') else '') for p in autor_str.split('), ')]
+            chunks = [p.strip() for p in parts]
+        else:
+            chunks = [c.strip() for c in autor_str.split(',') if c.strip()]
+    nomes, partidos, ufs = [], [], []
+    for ch in chunks:
+        m = _rx_autor_chunk.match(ch)
+        if m:
+            nomes.append(m.group('nome'))
+            partidos.append(m.group('partido'))
+            ufs.append(m.group('uf'))
+        else:
+            nomes.append(ch); partidos.append(None); ufs.append(None)
+    return nomes, partidos, ufs
+
+def _senado_primeira_autoria_da_pagina(codigo_materia) -> str | None:
+    url = f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo_materia}"
+    try:
+        r = _get_senado(url, timeout=45)
+        if r.status_code != 200:
+            return None
+        soup = BeautifulSoup(r.text, "html.parser")
+        holders = soup.select("div.span12.sf-bloco-paragrafos-condensados") or soup.select("div.bg-info-conteudo") or [soup]
+        for holder in holders:
+            for p in holder.find_all("p"):
+                strong = p.find("strong")
+                if not strong: continue
+                label = _normalize(strong.get_text(" ", strip=True).rstrip(":"))
+                if label == "autoria":
+                    span = p.find("span")
+                    if span:
+                        val = span.get_text(" ", strip=True)
+                        if val: return val
+                    full = p.get_text(" ", strip=True)
+                    val = re.sub(r'(?i)^\s*autoria\s*:\s*', "", full).strip()
+                    if val: return val
+        return None
+    except Exception:
+        return None
 
 def senado_df_hoje() -> pd.DataFrame:
     params = {"dataInicioApresentacao": today_compact(), "dataFimApresentacao": today_compact()}
@@ -315,7 +377,7 @@ def senado_df_hoje() -> pd.DataFrame:
         data   = _get(m, "Data")   or _get(dados, "DataApresentacao") or _get(m, "DataApresentacao")
         ementa = (_get(m, "Ementa") or _get(dados, "EmentaMateria") or _get(m, "EmentaMateria") or "")
 
-        # autores
+        # ---- autores (API + fallback texto) ----
         autor_str = _get(m, "Autor")
         nomes, partidos, ufs = [], [], []
         for bloco in ("Autoria","Autores"):
@@ -333,6 +395,17 @@ def senado_df_hoje() -> pd.DataFrame:
                     if nome: nomes.append(nome)
                     partidos.append(partido if partido else None)
                     ufs.append(uf if uf else None)
+
+        if _normalize(autor_str) == _normalize("Câmara dos Deputados"):
+            autor_page = _senado_primeira_autoria_da_pagina(codigo)
+            if autor_page:
+                autor_str = autor_page
+
+        if autor_str:
+            n2, p2, u2 = _parse_autores_senado_texto(autor_str)
+            if n2 and not nomes: nomes = n2
+            if any(p2) and not any(partidos): partidos = p2
+            if any(u2) and not any(ufs): ufs = u2
 
         # granular + coautores "Nome (PARTIDO/UF)"
         if nomes:
@@ -367,12 +440,14 @@ def senado_df_hoje() -> pd.DataFrame:
             "Palavras Chave": kw_str,
             "Clientes": clientes_str,
             "Temas": temas_str,
+            # autoria granular
             "Autor Principal": ap_nome,
             "Autor Principal Partido": ap_part or "",
             "Autor Principal UF": ap_uf or "",
             "Autor Principal Tipo": ap_tipo,
             "Coautores": coau,
             "Qtd Coautores": str(qtd_coaut),
+            # links / auditoria
             "Link Página": f"https://www25.senado.leg.br/web/atividade/materias/-/materia/{codigo}",
             "Inteiro Teor URL": it_url or "",
             "Ingest At": _fmt_dt(now_br()),
@@ -383,7 +458,9 @@ def senado_df_hoje() -> pd.DataFrame:
         df = df.sort_values(["Data Apresentação","UID"], ascending=[False, False]).reset_index(drop=True)
     return df
 
-# ====================== CÂMARA ======================
+# =========================================================
+#                       CÂMARA
+# =========================================================
 BASE_CAMARA = "https://dadosabertos.camara.leg.br/api/v2/proposicoes"
 BASE_DEP    = "https://dadosabertos.camara.leg.br/api/v2/deputados"
 
@@ -434,6 +511,7 @@ def _autores_camara_completo(prop_id:int) -> dict:
     except Exception:
         pass
 
+    # escolher principal
     ap = None
     for a in out:
         if a.get("ordem") == 1:
@@ -454,6 +532,7 @@ def _autores_camara_completo(prop_id:int) -> dict:
     autor_principal_uf = ap["uf"] if ap else ""
     autor_principal_tipo = "Parlamentar" if (ap and ap.get("is_dep")) else (_infer_tipo_autor(autor_principal) if autor_principal else "")
 
+    # coautores como "Nome (PARTIDO/UF)"
     co_labels = _dedup_preserve([
         _label_with_party_uf(a["nome"], a.get("partido"), a.get("uf"))
         for a in out if a is not ap and a.get("nome")
@@ -546,12 +625,14 @@ def camara_df_hoje() -> pd.DataFrame:
                 "Palavras Chave": kw_str,
                 "Clientes": clientes_str,
                 "Temas": temas_str,
+                # autoria granular
                 "Autor Principal": autores.get("ap_nome",""),
                 "Autor Principal Partido": autores.get("ap_partido",""),
                 "Autor Principal UF": autores.get("ap_uf",""),
                 "Autor Principal Tipo": autores.get("ap_tipo",""),
                 "Coautores": autores.get("coautores",""),
                 "Qtd Coautores": autores.get("qtd_coaut","0"),
+                # links / auditoria
                 "Link Página": f"https://www.camara.leg.br/propostas-legislativas/{pid}",
                 "Inteiro Teor URL": it_url or "",
                 "Ingest At": _fmt_dt(now_br()),
@@ -566,12 +647,16 @@ def camara_df_hoje() -> pd.DataFrame:
         df = df.sort_values(["Data Apresentação","UID"], ascending=[False, False]).reset_index(drop=True)
     return df
 
-# ====================== Google Sheets (simples) ======================
+# =========================================================
+#                 APPEND no Google Sheets (dedupe)
+# =========================================================
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")  # planilha geral
 SHEET_SENADO   = os.environ.get("SHEET_SENADO", "Senado")
 SHEET_CAMARA   = os.environ.get("SHEET_CAMARA", "Camara")
 
+# nova planilha com abas por cliente (Câmara + Senado)
 SPREADSHEET_ID_CLIENTES = os.environ.get("SPREADSHEET_ID_CLIENTES")
+
 CREDENTIALS_JSON = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "credentials.json")
 
 NEEDED_COLUMNS = [
@@ -579,32 +664,13 @@ NEEDED_COLUMNS = [
     "Sigla","Número","Ano",
     "Data Apresentação","Ementa",
     "Palavras Chave","Clientes","Temas",
+    # autoria granular
     "Autor Principal","Autor Principal Partido","Autor Principal UF","Autor Principal Tipo",
     "Coautores","Qtd Coautores",
+    # links e auditoria
     "Link Página","Inteiro Teor URL",
     "Ingest At",
 ]
-
-import gspread
-from google.oauth2.service_account import Credentials as GCreds
-
-def _open_sheet(spreadsheet_id: str):
-    scopes = ["https://www.googleapis.com/auth/spreadsheets",
-              "https://www.googleapis.com/auth/drive"]
-    creds = GCreds.from_service_account_file(CREDENTIALS_JSON, scopes=scopes)
-    gc = gspread.authorize(creds)
-    return gc.open_by_key(spreadsheet_id)
-
-def _retry_api(callable_, *args, **kwargs):
-    max_tries, delay = 5, 1.0
-    for _ in range(max_tries):
-        try:
-            return callable_(*args, **kwargs)
-        except gspread.exceptions.APIError as e:
-            s = str(e).lower()
-            if "429" in s or "quota" in s or "rate" in s or "503" in s or "500" in s:
-                time.sleep(delay); delay = min(delay*2, 8); continue
-            raise
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     for col in NEEDED_COLUMNS:
@@ -614,73 +680,144 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         df[c] = df[c].fillna("").astype(str)
     return df[NEEDED_COLUMNS].copy()
 
-def _a1_uid_range(name: str) -> str:
-    return f"'{name.replace(\"'\",\"''\")}'!A2:A"
+def _ensure_header(ws, header):
+    first_row = ws.row_values(1)
+    if first_row != header:
+        ws.resize(rows=max(2, ws.row_count), cols=len(header))
+        ws.update('1:1', [header])
 
-def insert_top_general(df: pd.DataFrame, sheet_name: str):
-    if df is None or df.empty or not SPREADSHEET_ID:
-        print(f"[{sheet_name}] sem dados ou SPREADSHEET_ID ausente."); return
+def _open_sheet(spreadsheet_id: str):
+    import gspread
+    from google.oauth2.service_account import Credentials
+    scopes = ["https://www.googleapis.com/auth/spreadsheets",
+              "https://www.googleapis.com/auth/drive"]
+    creds = Credentials.from_service_account_file(CREDENTIALS_JSON, scopes=scopes)
+    gc = gspread.authorize(creds)
+    return gc.open_by_key(spreadsheet_id)
+
+def ensure_headers(spreadsheet_id: str, sheet_names: list[str]):
+    """Garante que cada aba exista e tenha o cabeçalho NEEDED_COLUMNS,
+    mesmo sem linhas novas no dia."""
+    if not spreadsheet_id or not sheet_names:
+        return
+    sh = _open_sheet(spreadsheet_id)
+    import gspread
+    for name in sheet_names:
+        try:
+            ws = sh.worksheet(name)
+            _ensure_header(ws, NEEDED_COLUMNS)
+        except Exception as e:
+            if isinstance(e, gspread.WorksheetNotFound):  # type: ignore
+                ws = sh.add_worksheet(title=name, rows="2", cols=len(NEEDED_COLUMNS))
+                _ensure_header(ws, NEEDED_COLUMNS)
+            else:
+                raise
+
+def append_dedupe(df: pd.DataFrame, sheet_name: str):
+    if df is None or df.empty:
+        print(f"[{sheet_name}] nenhum dado para enviar.")
+        return
+    if not SPREADSHEET_ID:
+        print("SPREADSHEET_ID não definido; pulando envio ao Sheets.")
+        return
     sh = _open_sheet(SPREADSHEET_ID)
-    ws = _retry_api(sh.worksheet, sheet_name)
     df = _normalize_columns(df)
+    try:
+        import gspread
+        ws = sh.worksheet(sheet_name)
+        _ensure_header(ws, NEEDED_COLUMNS)
+        existing = set(ws.col_values(1)[1:])
+        new_df = df[~df["UID"].isin(existing)].copy()
+        if new_df.empty:
+            print(f"[{sheet_name}] nada novo para anexar.")
+            return
+        ws.append_rows(new_df.values.tolist(), value_input_option="USER_ENTERED")
+        print(f"[{sheet_name}] adicionadas {len(new_df)} linhas novas.")
+    except Exception as e:
+        import gspread
+        if isinstance(e, gspread.WorksheetNotFound):  # type: ignore
+            ws = sh.add_worksheet(title=sheet_name, rows=str(max(100, len(df)+10)), cols=len(NEEDED_COLUMNS))
+            _ensure_header(ws, NEEDED_COLUMNS)
+            if not df.empty:
+                ws.append_rows(df.values.tolist(), value_input_option="USER_ENTERED")
+            print(f"[{sheet_name}] criada e preenchida com {len(df)} linhas.")
+        else:
+            raise
 
-    vals = _retry_api(sh.batch_get, [_a1_uid_range(sheet_name)]) or [[]]
-    existing = set(v[0].strip() for v in (vals[0] if vals else []) if v)
-    new_df = df[~df["UID"].isin(existing)]
-    if new_df.empty:
-        print(f"[{sheet_name}] nada novo para inserir."); return
+def append_por_cliente(df_total: pd.DataFrame):
+    """Envio para SPREADSHEET_ID_CLIENTES, uma aba por cliente (sigla), juntando Câmara+Senado."""
+    if not SPREADSHEET_ID_CLIENTES:
+        print("SPREADSHEET_ID_CLIENTES não definido; pulando planilha por cliente.")
+        return
+    # garante cabeçalhos de TODAS as abas de cliente, mesmo sem dados novos
+    ensure_headers(SPREADSHEET_ID_CLIENTES, list(CLIENT_THEME.keys()))
 
-    _retry_api(ws.insert_rows, new_df.values.tolist(), row=2, value_input_option="USER_ENTERED")
-    print(f"[{sheet_name}] inseridas {len(new_df)} linhas no topo.")
+    if df_total is None or df_total.empty:
+        print("[clientes] nada a enviar.")
+        return
 
-def insert_top_clients(df_total: pd.DataFrame):
-    if df_total is None or df_total.empty or not SPREADSHEET_ID_CLIENTES:
-        print("[clientes] sem dados ou SPREADSHEET_ID_CLIENTES ausente."); return
     sh = _open_sheet(SPREADSHEET_ID_CLIENTES)
-
     df_total = _normalize_columns(df_total)
+
     all_clients = list(CLIENT_THEME.keys())
 
-    # separa por cliente (só os que têm linhas)
-    by_client = {}
-    for cli in all_clients:
-        mask = df_total["Clientes"].str.contains(rf'(^|;\s*){re.escape(cli)}(\s*;|$)', case=False, na=False)
-        sub = df_total[mask]
-        if not sub.empty:
-            by_client[cli] = sub
+    for client in all_clients:
+        # match seguro da sigla dentro do campo 'Clientes' separado por ';'
+        mask = df_total["Clientes"].str.contains(rf'(^|;\s*){re.escape(client)}(\s*;|$)', case=False, na=False)
+        sub = df_total[mask].copy()
+        sheet_name = client
+        if sub.empty:
+            print(f"[{sheet_name}] sem linhas novas hoje.")
+            continue
+        try:
+            import gspread
+            ws = sh.worksheet(sheet_name)
+            _ensure_header(ws, NEEDED_COLUMNS)
+            existing = set(ws.col_values(1)[1:])
+            new_df = sub[~sub["UID"].isin(existing)].copy()
+            if new_df.empty:
+                print(f"[{sheet_name}] nada novo para anexar.")
+                continue
+            ws.append_rows(new_df.values.tolist(), value_input_option="USER_ENTERED")
+            print(f"[{sheet_name}] adicionadas {len(new_df)} linhas novas.")
+        except Exception as e:
+            import gspread
+            if isinstance(e, gspread.WorksheetNotFound):  # type: ignore
+                ws = sh.add_worksheet(title=sheet_name, rows=str(max(100, len(sub)+10)), cols=len(NEEDED_COLUMNS))
+                _ensure_header(ws, NEEDED_COLUMNS)
+                ws.append_rows(sub.values.tolist(), value_input_option="USER_ENTERED")
+                print(f"[{sheet_name}] criada e preenchida com {len(sub)} linhas.")
+            else:
+                raise
 
-    if not by_client:
-        print("[clientes] nenhum cliente com linhas novas."); return
-
-    # leitura em lote da coluna A (UID) de todas as abas envolvidas
-    ranges = [_a1_uid_range(cli) for cli in by_client.keys()]
-    vals = _retry_api(sh.batch_get, ranges) or []
-    existing_by_cli = {}
-    for cli, v in zip(by_client.keys(), vals):
-        existing_by_cli[cli] = set(r[0].strip() for r in v if r)
-
-    # inserir no topo por aba
-    ws_map = {ws.title: ws for ws in _retry_api(sh.worksheets)}
-    for cli, sub in by_client.items():
-        ws = ws_map.get(cli) or _retry_api(sh.worksheet, cli)
-        new_sub = sub[~sub["UID"].isin(existing_by_cli.get(cli, set()))]
-        if new_sub.empty:
-            print(f"[{cli}] nada novo para inserir."); continue
-        _retry_api(ws.insert_rows, new_sub.values.tolist(), row=2, value_input_option="USER_ENTERED")
-        print(f"[{cli}] inseridas {len(new_sub)} linhas no topo.")
-
-# ====================== MAIN ======================
+# =========================================================
+#                        MAIN
+# =========================================================
 def main():
     senado = senado_df_hoje()
     camara = camara_df_hoje()
+
     print(f"Senado: {len(senado)} linhas | Câmara: {len(camara)} linhas")
 
-    # 1) Planilha geral (abas já existem)
+    # Força cabeçalhos nas planilhas/abas, mesmo sem dados novos
     if SPREADSHEET_ID:
-        insert_top_general(senado, SHEET_SENADO)
-        insert_top_general(camara, SHEET_CAMARA)
+        ensure_headers(SPREADSHEET_ID, [SHEET_SENADO, SHEET_CAMARA])
+    if SPREADSHEET_ID_CLIENTES:
+        ensure_headers(SPREADSHEET_ID_CLIENTES, list(CLIENT_THEME.keys()))
 
-    # 2) Planilha por cliente (abas já existem)
+    if not SPREADSHEET_ID and not SPREADSHEET_ID_CLIENTES:
+        stamp = today_compact()
+        senado.to_csv(f"senado_{stamp}.csv", index=False)
+        camara.to_csv(f"camara_{stamp}.csv", index=False)
+        print("Sem IDs de planilha; arquivos CSV salvos.")
+        return
+
+    # 1) Planilha geral
+    if SPREADSHEET_ID:
+        append_dedupe(senado, SHEET_SENADO)
+        append_dedupe(camara, SHEET_CAMARA)
+
+    # 2) Planilha por cliente (Câmara + Senado combinados)
     if SPREADSHEET_ID_CLIENTES:
         if senado is None or senado.empty:
             total = camara.copy()
@@ -688,7 +825,7 @@ def main():
             total = senado.copy()
         else:
             total = pd.concat([senado, camara], ignore_index=True)
-        insert_top_clients(total)
+        append_por_cliente(total)
 
 if __name__ == "__main__":
     main()
