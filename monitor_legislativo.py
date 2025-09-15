@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Monitor Legislativo – Novas proposições (Câmara + Senado)
 # Keywords por palavra/frase inteira + autoria granular + abas por cliente
-# >>> Escreve no Google Sheets INSERINDO NO TOPO (linha 2) em vez de append. <<<
+# >>> Escreve no Google Sheets INSERINDO NO TOPO (linha 2) e com leituras OTIMIZADAS (batch + backoff).
 
 import os, re, time, requests, pandas as pd, unicodedata
 from datetime import datetime
@@ -301,7 +301,7 @@ def _senado_inteiro_teor(codigo_materia):
     if u: return u, d
     return _senado_inteiro_teor_page(codigo_materia)
 
-# Regex "Nome (PARTIDO/UF)" com vários autores separados por ';' ou por '), '
+# Regex "Nome (PARTIDO/UF)" com vários autores separados por ';' ou '), '
 _rx_autor_chunk = re.compile(r"""\s*
     (?P<nome>.+?)
     (?:\s*\(\s*(?P<partido>[A-ZÀ-Ü\-]+)\s*/\s*(?P<uf>[A-Z]{2})\s*\))?
@@ -531,7 +531,7 @@ def _autores_camara_completo(prop_id:int) -> dict:
     autor_principal = ap["nome"] if ap else ""
     autor_principal_part = ap["partido"] if ap else ""
     autor_principal_uf = ap["uf"] if ap else ""
-    autor_principal_tipo = "Parlamentar" if (ap and ap.get("is_dep")) else (_infer_tipo_autor(autor_principal) if autor_principal else "")
+    autor_principal_tipo = "Parlamentar" se (ap and ap.get("is_dep")) else (_infer_tipo_autor(autor_principal) if autor_principal else "")
 
     # coautores como "Nome (PARTIDO/UF)"
     co_labels = _dedup_preserve([
@@ -649,7 +649,7 @@ def camara_df_hoje() -> pd.DataFrame:
     return df
 
 # =========================================================
-#                 APPEND (AGORA: INSERIR NO TOPO) no Google Sheets
+#                 Google Sheets (inserir no topo + otimizações)
 # =========================================================
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")  # planilha geral
 SHEET_SENADO   = os.environ.get("SHEET_SENADO", "Senado")
@@ -673,6 +673,37 @@ NEEDED_COLUMNS = [
     "Ingest At",
 ]
 
+# ---------- gspread helpers (retry/backoff + batch)
+import gspread
+from google.oauth2.service_account import Credentials as GCreds
+
+def _open_sheet(spreadsheet_id: str):
+    scopes = ["https://www.googleapis.com/auth/spreadsheets",
+              "https://www.googleapis.com/auth/drive"]
+    creds = GCreds.from_service_account_file(CREDENTIALS_JSON, scopes=scopes)
+    gc = gspread.authorize(creds)
+    return gc.open_by_key(spreadsheet_id)
+
+def _retry_api(callable_, *args, **kwargs):
+    """Retry progressivo p/ 429/5xx."""
+    max_tries = 6
+    delay = 1.0
+    for i in range(max_tries):
+        try:
+            return callable_(*args, **kwargs)
+        except gspread.exceptions.APIError as e:
+            s = str(e).lower()
+            if "429" in s or "rate" in s or "quota" in s or "503" in s or "500" in s:
+                time.sleep(delay)
+                delay = min(delay * 2, 16)
+                continue
+            raise
+
+def _ensure_header_on_create(ws, header):
+    # minimiza leituras: só usa ao criar a aba
+    ws.resize(rows=max(2, ws.row_count), cols=len(header))
+    _retry_api(ws.update, '1:1', [header])
+
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     for col in NEEDED_COLUMNS:
         if col not in df.columns:
@@ -681,122 +712,118 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         df[c] = df[c].fillna("").astype(str)
     return df[NEEDED_COLUMNS].copy()
 
-def _ensure_header(ws, header):
-    first_row = ws.row_values(1)
-    if first_row != header:
-        ws.resize(rows=max(2, ws.row_count), cols=len(header))
-        ws.update('1:1', [header])
-
-def _open_sheet(spreadsheet_id: str):
-    import gspread
-    from google.oauth2.service_account import Credentials
-    scopes = ["https://www.googleapis.com/auth/spreadsheets",
-              "https://www.googleapis.com/auth/drive"]
-    creds = Credentials.from_service_account_file(CREDENTIALS_JSON, scopes=scopes)
-    gc = gspread.authorize(creds)
-    return gc.open_by_key(spreadsheet_id)
-
 def ensure_headers(spreadsheet_id: str, sheet_names: list[str]):
-    """Garante que cada aba exista e tenha o cabeçalho NEEDED_COLUMNS,
-    mesmo sem linhas novas no dia."""
+    """Cria abas que faltam e grava cabeçalho (sem ler cabeçalho de existentes)."""
     if not spreadsheet_id or not sheet_names:
         return
     sh = _open_sheet(spreadsheet_id)
-    import gspread
+    # um GET só:
+    existing = {ws.title: ws for ws in _retry_api(sh.worksheets)}
     for name in sheet_names:
-        try:
-            ws = sh.worksheet(name)
-            _ensure_header(ws, NEEDED_COLUMNS)
-        except Exception as e:
-            if isinstance(e, gspread.WorksheetNotFound):  # type: ignore
-                ws = sh.add_worksheet(title=name, rows="2", cols=len(NEEDED_COLUMNS))
-                _ensure_header(ws, NEEDED_COLUMNS)
-            else:
-                raise
+        if name in existing:
+            continue
+        ws = _retry_api(sh.add_worksheet, title=name, rows="2", cols=len(NEEDED_COLUMNS))
+        _ensure_header_on_create(ws, NEEDED_COLUMNS)
 
 def append_dedupe(df: pd.DataFrame, sheet_name: str):
-    """
-    Dedupe por UID e INSERE as novas linhas no topo (logo abaixo do cabeçalho).
-    """
+    """Dedupe por UID e INSERE as novas linhas no topo (linha 2)."""
     if df is None or df.empty:
         print(f"[{sheet_name}] nenhum dado para enviar.")
         return
     if not SPREADSHEET_ID:
         print("SPREADSHEET_ID não definido; pulando envio ao Sheets.")
         return
+
     sh = _open_sheet(SPREADSHEET_ID)
     df = _normalize_columns(df)
+
+    # pega uma vez a worksheet; 1 leitura
+    ws = None
     try:
-        import gspread
-        ws = sh.worksheet(sheet_name)
-        _ensure_header(ws, NEEDED_COLUMNS)
-        existing = set(ws.col_values(1)[1:])
-        new_df = df[~df["UID"].isin(existing)].copy()
-        if new_df.empty:
-            print(f"[{sheet_name}] nada novo para inserir.")
-            return
-        # >>> INSERE NO TOPO (linha 2)
-        ws.insert_rows(new_df.values.tolist(), row=2, value_input_option="USER_ENTERED")
-        print(f"[{sheet_name}] inseridas {len(new_df)} linhas no topo.")
-    except Exception as e:
-        import gspread
-        if isinstance(e, gspread.WorksheetNotFound):  # type: ignore
-            ws = sh.add_worksheet(title=sheet_name, rows=str(max(100, len(df)+10)), cols=len(NEEDED_COLUMNS))
-            _ensure_header(ws, NEEDED_COLUMNS)
-            if not df.empty:
-                ws.insert_rows(df.values.tolist(), row=2, value_input_option="USER_ENTERED")
-            print(f"[{sheet_name}] criada e preenchida (no topo) com {len(df)} linhas.")
-        else:
-            raise
+        ws = next((w for w in _retry_api(sh.worksheets) if w.title == sheet_name), None)
+        if ws is None:
+            ws = _retry_api(sh.add_worksheet, title=sheet_name, rows=str(max(100, len(df)+10)), cols=len(NEEDED_COLUMNS))
+            _ensure_header_on_create(ws, NEEDED_COLUMNS)
+    except Exception:
+        ws = _retry_api(sh.add_worksheet, title=sheet_name, rows=str(max(100, len(df)+10)), cols=len(NEEDED_COLUMNS))
+        _ensure_header_on_create(ws, NEEDED_COLUMNS)
+
+    # ler UIDs existentes (coluna A) – 1 leitura
+    # usar range direto pra reduzir payload
+    a1 = f"'{sheet_name.replace(\"'\",\"''\")}'!A2:A"
+    vals = _retry_api(sh.batch_get, [a1]) or [[]]
+    existing = set(v[0].strip() for v in vals[0] if v)
+
+    new_df = df[~df["UID"].isin(existing)].copy()
+    if new_df.empty:
+        print(f"[{sheet_name}] nada novo para inserir.")
+        return
+
+    _retry_api(ws.insert_rows, new_df.values.tolist(), row=2, value_input_option="USER_ENTERED")
+    print(f"[{sheet_name}] inseridas {len(new_df)} linhas no topo.")
+
+def _a1_uid_range(name: str) -> str:
+    # A1 seguro para nomes com espaços/aspas
+    return f"'{name.replace(\"'\",\"''\")}'!A2:A"
 
 def append_por_cliente(df_total: pd.DataFrame):
     """
     Envio para SPREADSHEET_ID_CLIENTES, uma aba por cliente (sigla), juntando Câmara+Senado.
-    Dedupe por UID e INSERE no topo.
+    Dedupe por UID usando batch_get (todas as abas em 1 chamada) e INSERE no topo.
     """
     if not SPREADSHEET_ID_CLIENTES:
         print("SPREADSHEET_ID_CLIENTES não definido; pulando planilha por cliente.")
         return
 
-    ensure_headers(SPREADSHEET_ID_CLIENTES, list(CLIENT_THEME.keys()))
     if df_total is None or df_total.empty:
         print("[clientes] nada a enviar.")
         return
 
     sh = _open_sheet(SPREADSHEET_ID_CLIENTES)
+
+    # garante abas (sem leituras de cabeçalho)
+    all_clients = list(CLIENT_THEME.keys())
+    ensure_headers(SPREADSHEET_ID_CLIENTES, all_clients)
+
+    # mapeia worksheets existentes (1 leitura)
+    ws_map = {ws.title: ws for ws in _retry_api(sh.worksheets)}
+
     df_total = _normalize_columns(df_total)
 
-    all_clients = list(CLIENT_THEME.keys())
-
+    # separa por cliente
+    by_client = {}
     for client in all_clients:
-        # match seguro da sigla dentro do campo 'Clientes' separado por ';'
         mask = df_total["Clientes"].str.contains(rf'(^|;\s*){re.escape(client)}(\s*;|$)', case=False, na=False)
         sub = df_total[mask].copy()
-        sheet_name = client
-        if sub.empty:
-            print(f"[{sheet_name}] sem linhas novas hoje.")
+        if not sub.empty:
+            by_client[client] = sub
+
+    if not by_client:
+        print("[clientes] sem linhas novas filtradas por clientes.")
+        return
+
+    # ------- LER UIDs EXISTENTES EM LOTE (uma chamada) -------
+    ranges = [_a1_uid_range(cli) for cli in by_client.keys()]
+    batch_vals = _retry_api(sh.batch_get, ranges) or []
+    existing_by_cli = {}
+    for cli, vals in zip(by_client.keys(), batch_vals):
+        existing_by_cli[cli] = set(v[0].strip() for v in vals if v)
+
+    # ------- INSERIR NO TOPO por cliente (apenas writes) -------
+    for cli, sub in by_client.items():
+        ws = ws_map.get(cli)
+        if ws is None:
+            ws = _retry_api(sh.add_worksheet, title=cli, rows=str(max(100, len(sub)+10)), cols=len(NEEDED_COLUMNS))
+            _ensure_header_on_create(ws, NEEDED_COLUMNS)
+            ws_map[cli] = ws
+
+        new_sub = sub[~sub["UID"].isin(existing_by_cli.get(cli, set()))].copy()
+        if new_sub.empty:
+            print(f"[{cli}] nada novo para inserir.")
             continue
-        try:
-            import gspread
-            ws = sh.worksheet(sheet_name)
-            _ensure_header(ws, NEEDED_COLUMNS)
-            existing = set(ws.col_values(1)[1:])
-            new_df = sub[~sub["UID"].isin(existing)].copy()
-            if new_df.empty:
-                print(f"[{sheet_name}] nada novo para inserir.")
-                continue
-            # >>> INSERE NO TOPO (linha 2)
-            ws.insert_rows(new_df.values.tolist(), row=2, value_input_option="USER_ENTERED")
-            print(f"[{sheet_name}] inseridas {len(new_df)} linhas no topo.")
-        except Exception as e:
-            import gspread
-            if isinstance(e, gspread.WorksheetNotFound):  # type: ignore
-                ws = sh.add_worksheet(title=sheet_name, rows=str(max(100, len(sub)+10)), cols=len(NEEDED_COLUMNS))
-                _ensure_header(ws, NEEDED_COLUMNS)
-                ws.insert_rows(sub.values.tolist(), row=2, value_input_option="USER_ENTERED")
-                print(f"[{sheet_name}] criada e preenchida (no topo) com {len(sub)} linhas.")
-            else:
-                raise
+
+        _retry_api(ws.insert_rows, new_sub.values.tolist(), row=2, value_input_option="USER_ENTERED")
+        print(f"[{cli}] inseridas {len(new_sub)} linhas no topo.")
 
 # =========================================================
 #                        MAIN
@@ -807,7 +834,7 @@ def main():
 
     print(f"Senado: {len(senado)} linhas | Câmara: {len(camara)} linhas")
 
-    # Força cabeçalhos nas planilhas/abas, mesmo sem dados novos
+    # Força criação de abas/cabeçalhos uma vez (sem leituras extras)
     if SPREADSHEET_ID:
         ensure_headers(SPREADSHEET_ID, [SHEET_SENADO, SHEET_CAMARA])
     if SPREADSHEET_ID_CLIENTES:
@@ -820,12 +847,12 @@ def main():
         print("Sem IDs de planilha; arquivos CSV salvos.")
         return
 
-    # 1) Planilha geral
+    # 1) Planilha geral (cada aba faz 1 leitura de A coluna + 1 leitura de worksheets) → ok
     if SPREADSHEET_ID:
         append_dedupe(senado, SHEET_SENADO)
         append_dedupe(camara, SHEET_CAMARA)
 
-    # 2) Planilha por cliente (Câmara + Senado combinados)
+    # 2) Planilha por cliente (batch_get para todas as abas numa única leitura)
     if SPREADSHEET_ID_CLIENTES:
         if senado is None or senado.empty:
             total = camara.copy()
