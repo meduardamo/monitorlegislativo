@@ -2,7 +2,7 @@ requests
 pandas
 openpyxl
 beautifulsoup4
-gspread
+gspread>=5.7
 gspread_dataframe
 google-auth
 backports.zoneinfo; python_version<"3.9"
