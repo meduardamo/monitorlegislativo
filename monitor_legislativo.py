@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 # Monitor Legislativo – Novas proposições (Câmara + Senado)
 # Keywords por palavra/frase inteira + autoria granular + abas por cliente
+# Modo Sheets: NÃO cria abas, NÃO muda cabeçalhos, NÃO sobrescreve.
+# Comportamento: insere novas linhas no TOPO (linha 2), dedupe por UID.
 
 import os, re, time, requests, pandas as pd, unicodedata
 from datetime import datetime
@@ -648,7 +650,7 @@ def camara_df_hoje() -> pd.DataFrame:
     return df
 
 # =========================================================
-#                 APPEND no Google Sheets (dedupe)
+#                 INSERÇÃO no Google Sheets (dedupe, topo)
 # =========================================================
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")  # planilha geral
 SHEET_SENADO   = os.environ.get("SHEET_SENADO", "Senado")
@@ -680,12 +682,6 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         df[c] = df[c].fillna("").astype(str)
     return df[NEEDED_COLUMNS].copy()
 
-def _ensure_header(ws, header):
-    first_row = ws.row_values(1)
-    if first_row != header:
-        ws.resize(rows=max(2, ws.row_count), cols=len(header))
-        ws.update('1:1', [header])
-
 def _open_sheet(spreadsheet_id: str):
     import gspread
     from google.oauth2.service_account import Credentials
@@ -696,61 +692,89 @@ def _open_sheet(spreadsheet_id: str):
     return gc.open_by_key(spreadsheet_id)
 
 def ensure_headers(spreadsheet_id: str, sheet_names: list[str]):
-    """Garante que cada aba exista e tenha o cabeçalho NEEDED_COLUMNS,
-    mesmo sem linhas novas no dia."""
+    """NO-OP: não cria abas e não altera cabeçalhos. Apenas checa se existem."""
     if not spreadsheet_id or not sheet_names:
         return
     sh = _open_sheet(spreadsheet_id)
-    import gspread
     for name in sheet_names:
         try:
-            ws = sh.worksheet(name)
-            _ensure_header(ws, NEEDED_COLUMNS)
-        except Exception as e:
-            if isinstance(e, gspread.WorksheetNotFound):  # type: ignore
-                ws = sh.add_worksheet(title=name, rows="2", cols=len(NEEDED_COLUMNS))
-                _ensure_header(ws, NEEDED_COLUMNS)
-            else:
-                raise
+            sh.worksheet(name)
+        except Exception:
+            print(f"[{name}] aba não encontrada na planilha {spreadsheet_id} — pulando (não crio automaticamente).")
 
-def append_dedupe(df: pd.DataFrame, sheet_name: str):
+# --------------------- Helpers de alinhamento/insert ---------------------
+def _sheet_header(ws) -> list[str]:
+    try:
+        hdr = ws.row_values(1)
+        return [h.strip() for h in hdr] if hdr else []
+    except Exception:
+        return []
+
+def _align_df_to_ws_header(df: pd.DataFrame, ws) -> pd.DataFrame:
+    """Reordena/completa df conforme o cabeçalho REAL da aba."""
+    header = _sheet_header(ws)
+    if not header:
+        header = NEEDED_COLUMNS[:]  # fallback passivo (sem escrever nada no sheet)
+    out = df.copy()
+    for h in header:
+        if h not in out.columns:
+            out[h] = ""
+    out = out[header]
+    out = out.fillna("").astype(str)
+    return out
+
+def _existing_uids(ws) -> set[str]:
+    """UIDs existentes (coluna A, da linha 2 em diante)."""
+    try:
+        rng = ws.batch_get(['A2:A'], value_render_option='UNFORMATTED_VALUE')
+        col = rng[0] if rng and rng[0] else []
+        return set(v[0] for v in col if v and v[0])
+    except Exception:
+        vals = ws.col_values(1)[1:]
+        return set(v for v in vals if v)
+
+def _insert_rows_top(ws, rows: list[list], chunk_size: int = 500):
+    """Insere as linhas na posição 2 preservando a ordem fornecida."""
+    idx = 0
+    while idx < len(rows):
+        ws.insert_rows(rows[idx:idx+chunk_size], row=2, value_input_option="USER_ENTERED")
+        idx += chunk_size
+
+def insert_dedupe_top(df: pd.DataFrame, sheet_name: str):
+    """Insere (não append) somente linhas novas (por UID) no TOPO (linha 2)."""
     if df is None or df.empty:
         print(f"[{sheet_name}] nenhum dado para enviar.")
         return
     if not SPREADSHEET_ID:
         print("SPREADSHEET_ID não definido; pulando envio ao Sheets.")
         return
-    sh = _open_sheet(SPREADSHEET_ID)
-    df = _normalize_columns(df)
-    try:
-        import gspread
-        ws = sh.worksheet(sheet_name)
-        _ensure_header(ws, NEEDED_COLUMNS)
-        existing = set(ws.col_values(1)[1:])
-        new_df = df[~df["UID"].isin(existing)].copy()
-        if new_df.empty:
-            print(f"[{sheet_name}] nada novo para anexar.")
-            return
-        ws.append_rows(new_df.values.tolist(), value_input_option="USER_ENTERED")
-        print(f"[{sheet_name}] adicionadas {len(new_df)} linhas novas.")
-    except Exception as e:
-        import gspread
-        if isinstance(e, gspread.WorksheetNotFound):  # type: ignore
-            ws = sh.add_worksheet(title=sheet_name, rows=str(max(100, len(df)+10)), cols=len(NEEDED_COLUMNS))
-            _ensure_header(ws, NEEDED_COLUMNS)
-            if not df.empty:
-                ws.append_rows(df.values.tolist(), value_input_option="USER_ENTERED")
-            print(f"[{sheet_name}] criada e preenchida com {len(df)} linhas.")
-        else:
-            raise
 
-def append_por_cliente(df_total: pd.DataFrame):
-    """Envio para SPREADSHEET_ID_CLIENTES, uma aba por cliente (sigla), juntando Câmara+Senado."""
+    sh = _open_sheet(SPREADSHEET_ID)
+    try:
+        ws = sh.worksheet(sheet_name)
+    except Exception:
+        print(f"[{sheet_name}] aba inexistente na planilha geral — pulando (não crio automaticamente).")
+        return
+
+    df = _normalize_columns(df)
+    exists = _existing_uids(ws)
+    new_df = df[~df["UID"].isin(exists)].copy()
+
+    if new_df.empty:
+        print(f"[{sheet_name}] nada novo para inserir.")
+        return
+
+    new_df = new_df.sort_values(["Data Apresentação","UID"], ascending=[False, False]).reset_index(drop=True)
+    aligned = _align_df_to_ws_header(new_df, ws)
+    rows = aligned.values.tolist()
+    _insert_rows_top(ws, rows)
+    print(f"[{sheet_name}] inseridas {len(rows)} linhas novas no topo.")
+
+def insert_por_cliente_top(df_total: pd.DataFrame):
+    """Envio p/ SPREADSHEET_ID_CLIENTES, uma aba por cliente, inserindo no topo (linha 2)."""
     if not SPREADSHEET_ID_CLIENTES:
         print("SPREADSHEET_ID_CLIENTES não definido; pulando planilha por cliente.")
         return
-    # garante cabeçalhos de TODAS as abas de cliente, mesmo sem dados novos
-    ensure_headers(SPREADSHEET_ID_CLIENTES, list(CLIENT_THEME.keys()))
 
     if df_total is None or df_total.empty:
         print("[clientes] nada a enviar.")
@@ -760,35 +784,32 @@ def append_por_cliente(df_total: pd.DataFrame):
     df_total = _normalize_columns(df_total)
 
     all_clients = list(CLIENT_THEME.keys())
-
     for client in all_clients:
-        # match seguro da sigla dentro do campo 'Clientes' separado por ';'
         mask = df_total["Clientes"].str.contains(rf'(^|;\s*){re.escape(client)}(\s*;|$)', case=False, na=False)
         sub = df_total[mask].copy()
         sheet_name = client
+
         if sub.empty:
             print(f"[{sheet_name}] sem linhas novas hoje.")
             continue
+
         try:
-            import gspread
             ws = sh.worksheet(sheet_name)
-            _ensure_header(ws, NEEDED_COLUMNS)
-            existing = set(ws.col_values(1)[1:])
-            new_df = sub[~sub["UID"].isin(existing)].copy()
-            if new_df.empty:
-                print(f"[{sheet_name}] nada novo para anexar.")
-                continue
-            ws.append_rows(new_df.values.tolist(), value_input_option="USER_ENTERED")
-            print(f"[{sheet_name}] adicionadas {len(new_df)} linhas novas.")
-        except Exception as e:
-            import gspread
-            if isinstance(e, gspread.WorksheetNotFound):  # type: ignore
-                ws = sh.add_worksheet(title=sheet_name, rows=str(max(100, len(sub)+10)), cols=len(NEEDED_COLUMNS))
-                _ensure_header(ws, NEEDED_COLUMNS)
-                ws.append_rows(sub.values.tolist(), value_input_option="USER_ENTERED")
-                print(f"[{sheet_name}] criada e preenchida com {len(sub)} linhas.")
-            else:
-                raise
+        except Exception:
+            print(f"[{sheet_name}] aba inexistente na planilha de clientes — pulando (não crio automaticamente).")
+            continue
+
+        exists = _existing_uids(ws)
+        new_df = sub[~sub["UID"].isin(exists)].copy()
+        if new_df.empty:
+            print(f"[{sheet_name}] nada novo para inserir.")
+            continue
+
+        new_df = new_df.sort_values(["Data Apresentação","UID"], ascending=[False, False]).reset_index(drop=True)
+        aligned = _align_df_to_ws_header(new_df, ws)
+        rows = aligned.values.tolist()
+        _insert_rows_top(ws, rows)
+        print(f"[{sheet_name}] inseridas {len(rows)} linhas novas no topo.")
 
 # =========================================================
 #                        MAIN
@@ -799,7 +820,7 @@ def main():
 
     print(f"Senado: {len(senado)} linhas | Câmara: {len(camara)} linhas")
 
-    # Força cabeçalhos nas planilhas/abas, mesmo sem dados novos
+    # Checa existência das abas (não cria / não altera cabeçalho)
     if SPREADSHEET_ID:
         ensure_headers(SPREADSHEET_ID, [SHEET_SENADO, SHEET_CAMARA])
     if SPREADSHEET_ID_CLIENTES:
@@ -812,12 +833,12 @@ def main():
         print("Sem IDs de planilha; arquivos CSV salvos.")
         return
 
-    # 1) Planilha geral
+    # 1) Planilha geral — INSERÇÃO NO TOPO
     if SPREADSHEET_ID:
-        append_dedupe(senado, SHEET_SENADO)
-        append_dedupe(camara, SHEET_CAMARA)
+        insert_dedupe_top(senado, SHEET_SENADO)
+        insert_dedupe_top(camara, SHEET_CAMARA)
 
-    # 2) Planilha por cliente (Câmara + Senado combinados)
+    # 2) Planilha por cliente (Câmara + Senado combinados) — INSERÇÃO NO TOPO
     if SPREADSHEET_ID_CLIENTES:
         if senado is None or senado.empty:
             total = camara.copy()
@@ -825,7 +846,7 @@ def main():
             total = senado.copy()
         else:
             total = pd.concat([senado, camara], ignore_index=True)
-        append_por_cliente(total)
+        insert_por_cliente_top(total)
 
 if __name__ == "__main__":
     main()
