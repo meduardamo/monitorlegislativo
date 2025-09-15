@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # Monitor Legislativo – Novas proposições (Câmara + Senado)
 # Keywords por palavra/frase inteira + autoria granular + abas por cliente
+# >>> Escreve no Google Sheets INSERINDO NO TOPO (linha 2) em vez de append. <<<
 
 import os, re, time, requests, pandas as pd, unicodedata
 from datetime import datetime
@@ -648,7 +649,7 @@ def camara_df_hoje() -> pd.DataFrame:
     return df
 
 # =========================================================
-#                 APPEND no Google Sheets (dedupe)
+#                 APPEND (AGORA: INSERIR NO TOPO) no Google Sheets
 # =========================================================
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")  # planilha geral
 SHEET_SENADO   = os.environ.get("SHEET_SENADO", "Senado")
@@ -714,6 +715,9 @@ def ensure_headers(spreadsheet_id: str, sheet_names: list[str]):
                 raise
 
 def append_dedupe(df: pd.DataFrame, sheet_name: str):
+    """
+    Dedupe por UID e INSERE as novas linhas no topo (logo abaixo do cabeçalho).
+    """
     if df is None or df.empty:
         print(f"[{sheet_name}] nenhum dado para enviar.")
         return
@@ -729,29 +733,32 @@ def append_dedupe(df: pd.DataFrame, sheet_name: str):
         existing = set(ws.col_values(1)[1:])
         new_df = df[~df["UID"].isin(existing)].copy()
         if new_df.empty:
-            print(f"[{sheet_name}] nada novo para anexar.")
+            print(f"[{sheet_name}] nada novo para inserir.")
             return
-        ws.append_rows(new_df.values.tolist(), value_input_option="USER_ENTERED")
-        print(f"[{sheet_name}] adicionadas {len(new_df)} linhas novas.")
+        # >>> INSERE NO TOPO (linha 2)
+        ws.insert_rows(new_df.values.tolist(), row=2, value_input_option="USER_ENTERED")
+        print(f"[{sheet_name}] inseridas {len(new_df)} linhas no topo.")
     except Exception as e:
         import gspread
         if isinstance(e, gspread.WorksheetNotFound):  # type: ignore
             ws = sh.add_worksheet(title=sheet_name, rows=str(max(100, len(df)+10)), cols=len(NEEDED_COLUMNS))
             _ensure_header(ws, NEEDED_COLUMNS)
             if not df.empty:
-                ws.append_rows(df.values.tolist(), value_input_option="USER_ENTERED")
-            print(f"[{sheet_name}] criada e preenchida com {len(df)} linhas.")
+                ws.insert_rows(df.values.tolist(), row=2, value_input_option="USER_ENTERED")
+            print(f"[{sheet_name}] criada e preenchida (no topo) com {len(df)} linhas.")
         else:
             raise
 
 def append_por_cliente(df_total: pd.DataFrame):
-    """Envio para SPREADSHEET_ID_CLIENTES, uma aba por cliente (sigla), juntando Câmara+Senado."""
+    """
+    Envio para SPREADSHEET_ID_CLIENTES, uma aba por cliente (sigla), juntando Câmara+Senado.
+    Dedupe por UID e INSERE no topo.
+    """
     if not SPREADSHEET_ID_CLIENTES:
         print("SPREADSHEET_ID_CLIENTES não definido; pulando planilha por cliente.")
         return
-    # garante cabeçalhos de TODAS as abas de cliente, mesmo sem dados novos
-    ensure_headers(SPREADSHEET_ID_CLIENTES, list(CLIENT_THEME.keys()))
 
+    ensure_headers(SPREADSHEET_ID_CLIENTES, list(CLIENT_THEME.keys()))
     if df_total is None or df_total.empty:
         print("[clientes] nada a enviar.")
         return
@@ -776,17 +783,18 @@ def append_por_cliente(df_total: pd.DataFrame):
             existing = set(ws.col_values(1)[1:])
             new_df = sub[~sub["UID"].isin(existing)].copy()
             if new_df.empty:
-                print(f"[{sheet_name}] nada novo para anexar.")
+                print(f"[{sheet_name}] nada novo para inserir.")
                 continue
-            ws.append_rows(new_df.values.tolist(), value_input_option="USER_ENTERED")
-            print(f"[{sheet_name}] adicionadas {len(new_df)} linhas novas.")
+            # >>> INSERE NO TOPO (linha 2)
+            ws.insert_rows(new_df.values.tolist(), row=2, value_input_option="USER_ENTERED")
+            print(f"[{sheet_name}] inseridas {len(new_df)} linhas no topo.")
         except Exception as e:
             import gspread
             if isinstance(e, gspread.WorksheetNotFound):  # type: ignore
                 ws = sh.add_worksheet(title=sheet_name, rows=str(max(100, len(sub)+10)), cols=len(NEEDED_COLUMNS))
                 _ensure_header(ws, NEEDED_COLUMNS)
-                ws.append_rows(sub.values.tolist(), value_input_option="USER_ENTERED")
-                print(f"[{sheet_name}] criada e preenchida com {len(sub)} linhas.")
+                ws.insert_rows(sub.values.tolist(), row=2, value_input_option="USER_ENTERED")
+                print(f"[{sheet_name}] criada e preenchida (no topo) com {len(sub)} linhas.")
             else:
                 raise
 
