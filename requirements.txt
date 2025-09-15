@@ -1,9 +1,8 @@
-requests
-pandas
-openpyxl
-beautifulsoup4
-gspread>=5.7
-gspread_dataframe
-google-auth
-backports.zoneinfo; python_version<"3.9"
-certifi
+# requirements.txt
+pandas==2.2.2
+requests==2.32.3
+beautifulsoup4==4.12.3
+gspread==6.1.2
+google-auth==2.35.0
+urllib3==2.2.3
+backports.zoneinfo==0.2.1 ; python_version < "3.9"
