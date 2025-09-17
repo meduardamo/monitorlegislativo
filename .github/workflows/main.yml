@@ -36,8 +36,20 @@ jobs:
         env:
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           SPREADSHEET_ID_CLIENTES: ${{ secrets.SPREADSHEET_ID_CLIENTES }}
-          SHEET_SENADO:  ${{ secrets.SHEET_SENADO }}
-          SHEET_CAMARA:  ${{ secrets.SHEET_CAMARA }}
+          SHEET_SENADO: ${{ secrets.SHEET_SENADO }}
+          SHEET_CAMARA: ${{ secrets.SHEET_CAMARA }}
           GOOGLE_APPLICATION_CREDENTIALS: credentials.json
         run: |
           python monitor_legislativo.py
+
+      - name: Run alignment
+        env:
+          GENAI_API_KEY: ${{ secrets.GENAI_API_KEY }}
+          SPREADSHEET_ID_CLIENTES: ${{ secrets.SPREADSHEET_ID_CLIENTES }}
+          GOOGLE_APPLICATION_CREDENTIALS: credentials.json
+          # Optional tuning:
+          # ALIGN_BATCH_SIZE: "20"
+          # ALIGN_SLEEP_SEC: "0"
+          # ALIGN_READ_RANGE: "A1:Z5000"
+        run: |
+          python alinhamento.py
