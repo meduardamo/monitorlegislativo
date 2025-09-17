@@ -1,8 +1,16 @@
-# requirements.txt
+# --- básico dos dois scripts (monitor_legislativo.py + alinhamento.py) ---
 pandas==2.2.2
 requests==2.32.3
-beautifulsoup4==4.12.3
-gspread==6.1.2
-google-auth==2.35.0
 urllib3==2.2.3
-backports.zoneinfo==0.2.1 ; python_version < "3.9"
+beautifulsoup4==4.12.3
+
+# Google Sheets
+gspread==6.1.2
+gspread-dataframe==3.3.1
+google-auth==2.35.0
+
+# Gemini (Google GenAI)
+google-genai>=1.0.0,<2.0.0
+
+# Só para Python < 3.9
+backports.zoneinfo==0.2.1; python_version < "3.9"
