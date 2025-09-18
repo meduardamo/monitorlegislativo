@@ -2,6 +2,7 @@ name: Monitor Legislativo
 
 on:
   schedule:
+    - cron: "0 10 * * *"  # 07h BRT
     - cron: "0 12 * * *"  # 09h BRT
     - cron: "0 15 * * *"  # 12h BRT
     - cron: "0 17 * * *"  # 14h BRT
