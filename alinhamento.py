@@ -1,8 +1,3 @@
-# -*- coding: utf-8 -*-
-# Fase 2 — Alinhamento por cliente (todas as abas exceto a última / "Giro de notícias")
-# Lê apenas a coluna "Ementa" e preenche "Alinhamento" + "Justificativa" na mesma linha.
-# Requisitos: google-genai, gspread, gspread-dataframe, pandas
-
 import os, time, json, re, random
 import pandas as pd
 import gspread
@@ -11,7 +6,7 @@ from google.oauth2.service_account import Credentials
 from google import genai
 from string import Template
 
-# ------------- CONFIG BÁSICA -------------
+# CONFIG BÁSICA
 GENAI_API_KEY = os.getenv("GENAI_API_KEY", "").strip()
 assert GENAI_API_KEY, "Defina o secret GENAI_API_KEY."
 
@@ -28,10 +23,10 @@ OUT_JUST_COL  = "Justificativa"
 
 # Ajustes finos
 BATCH_SIZE = int(os.getenv("ALIGN_BATCH_SIZE", "20"))
-SLEEP_SEC  = float(os.getenv("ALIGN_SLEEP_SEC", "0"))    # 0 para mais rápido
-READ_RANGE = os.getenv("ALIGN_READ_RANGE", "")           # ex.: "A1:Z5000" para reduzir 429
+SLEEP_SEC  = float(os.getenv("ALIGN_SLEEP_SEC", "0"))   
+READ_RANGE = os.getenv("ALIGN_READ_RANGE", "")          
 
-# ------------- MAPA: ABA -> (NOME, DESCRIÇÃO) -------------
+# MAPA: ABA -> (NOME, DESCRIÇÃO)
 ORG_MAP = {
     "IU": ("Instituto Unibanco (IU)",
            "O Instituto Unibanco (IU) é uma organização sem fins lucrativos que apoia redes estaduais de ensino na melhoria da gestão educacional por meio de projetos como o Jovem de Futuro, produção de conhecimento e apoio técnico a secretarias de educação."),
@@ -59,7 +54,7 @@ ORG_MAP = {
              "A Mevo é uma healthtech brasileira que integra soluções de saúde digital (da prescrição eletrônica à compra/entrega de medicamentos) conectando médicos, hospitais, farmácias e pacientes para tornar o cuidado mais simples e rastreável."),
 }
 
-# ------------- PROMPT (Template) -------------
+# PROMPT
 PROMPT = Template("""
 Você é analista de políticas públicas e deve avaliar a coerência de uma proposição legislativa com a missão do(a) $cliente.
 
@@ -85,7 +80,7 @@ Ementa:
 \"\"\"$ementa\"\"\" 
 """.strip())
 
-# ------------- Conexões -------------
+# Conexões
 genai_client = genai.Client(api_key=GENAI_API_KEY)
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets",
@@ -94,7 +89,7 @@ creds = Credentials.from_service_account_file(CREDENTIALS_JSON, scopes=SCOPES)
 gc = gspread.authorize(creds)
 sh = gc.open_by_key(SPREADSHEET_ID_CLIENTES)
 
-# ------------- Utilitários -------------
+# Utilitários
 def read_sheet_df(ws, read_range: str = "") -> pd.DataFrame:
     """Lê a aba com 1 chamada (range ou all_values). Tenta backoff p/ 429."""
     def _once():
@@ -155,7 +150,6 @@ def classify_ementa(ementa: str, nome_cli: str, desc_cli: str) -> dict:
 def process_sheet(ws):
     """Processa uma aba: lê, classifica e grava por lote."""
     title = ws.title.strip()
-    # segurança extra: pula se for a última (tratado fora) ou título for exatamente "Giro de notícias"
     if title.lower() == "giro de notícias":
         print(f"⏭️  Pulando aba '{title}'.")
         return
