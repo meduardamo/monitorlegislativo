@@ -1,14 +1,8 @@
-# -*- coding: utf-8 -*-
-# Monitor Legislativo – Novas proposições (Câmara + Senado)
-# Keywords por palavra/frase inteira + autoria granular + abas por cliente
-# Modo Sheets: NÃO cria abas, NÃO muda cabeçalhos, NÃO sobrescreve.
-# Comportamento: insere novas linhas no TOPO (linha 2), dedupe por UID.
-
 import os, re, time, requests, pandas as pd, unicodedata
 from datetime import datetime
 from urllib.parse import urlparse
 
-# ====================== Timezone BR ======================
+# Timezone BR
 try:
     from zoneinfo import ZoneInfo
 except Exception:  # py<3.9
@@ -19,7 +13,7 @@ now_br = lambda: datetime.now(TZ_BR)
 today_iso = lambda: now_br().date().strftime("%Y-%m-%d")
 today_compact = lambda: now_br().date().strftime("%Y%m%d")
 
-# ====================== HTTP ======================
+# HTTP
 HDR = {
     "Accept": "application/json,text/html,*/*",
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -115,7 +109,7 @@ def _get_senado(url, **kw):
         kw2 = dict(kw); kw2["verify"] = False
         return _sess.get(url, **kw2)
 
-# ====================== Mapa: Cliente → Tema → Keywords (whole-word) ======================
+# Mapa: Cliente → Tema → Keywords (whole-word)
 CLIENT_THEME_DATA = """
 IAS|Educação|Matemática; Alfabetização; Alfabetização Matemática; Recomposição de aprendizagem; Plano Nacional de Educação
 ISG|Educação|Tempo Integral; Ensino em tempo integral; Ensino Profissional e Tecnológico; Fundeb; PROPAG; Educação em tempo integral; Escola em tempo integral; Plano Nacional de Educação; Programa escola em tempo integral; Programa Pé-de-meia; PNEERQ; INEP; FNDE; Conselho Nacional de Educação; PDDE; Programa de Fomento às Escolas de Ensino Médio em Tempo Integral; Celular nas escolas; Juros da Educação
@@ -181,7 +175,7 @@ def _extract_kw_client_theme(texto: str):
     temas_str = "; ".join(sorted({t for _, t in pairs}))
     return kw_str, clientes_str, temas_str
 
-# ====================== Helpers de DATA/HORA ======================
+# Helpers de DATA/HORA
 def _fmt_date(v) -> str:
     try:
         d = pd.to_datetime(v, errors="coerce")
@@ -202,7 +196,7 @@ def _fmt_dt(v) -> str:
         except Exception:
             return ""
 
-# ====================== Heurística do tipo de autor ======================
+# Heurística do tipo de autor
 _rx_orgao = re.compile(r'(?i)\b(comissao|comissão|mesa|presid[eê]ncia|c[âa]mara dos deputados|senado federal|congresso|comit[eê]|subcomissao|subcomissão)\b')
 _rx_exec  = re.compile(r'(?i)\b(poder executivo|presid[eê]ncia da rep[úu]blica|minist[eé]rio|ministro|casa civil)\b')
 
@@ -213,9 +207,7 @@ def _infer_tipo_autor(nome: str|None) -> str:
     if _rx_exec.search(n):  return "Executivo"
     return "Parlamentar"
 
-# =========================================================
 #                       SENADO
-# =========================================================
 from bs4 import BeautifulSoup
 BASE_PESQUISA_SF = "https://legis.senado.leg.br/dadosabertos/materia/pesquisa/lista.json"
 
@@ -460,9 +452,7 @@ def senado_df_hoje() -> pd.DataFrame:
         df = df.sort_values(["Data Apresentação","UID"], ascending=[False, False]).reset_index(drop=True)
     return df
 
-# =========================================================
 #                       CÂMARA
-# =========================================================
 BASE_CAMARA = "https://dadosabertos.camara.leg.br/api/v2/proposicoes"
 BASE_DEP    = "https://dadosabertos.camara.leg.br/api/v2/deputados"
 
@@ -649,9 +639,7 @@ def camara_df_hoje() -> pd.DataFrame:
         df = df.sort_values(["Data Apresentação","UID"], ascending=[False, False]).reset_index(drop=True)
     return df
 
-# =========================================================
 #                 INSERÇÃO no Google Sheets (dedupe, topo)
-# =========================================================
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")  # planilha geral
 SHEET_SENADO   = os.environ.get("SHEET_SENADO", "Senado")
 SHEET_CAMARA   = os.environ.get("SHEET_CAMARA", "Camara")
@@ -702,7 +690,7 @@ def ensure_headers(spreadsheet_id: str, sheet_names: list[str]):
         except Exception:
             print(f"[{name}] aba não encontrada na planilha {spreadsheet_id} — pulando (não crio automaticamente).")
 
-# --------------------- Helpers de alinhamento/insert ---------------------
+# Helpers de alinhamento/insert
 def _sheet_header(ws) -> list[str]:
     try:
         hdr = ws.row_values(1)
@@ -811,9 +799,7 @@ def insert_por_cliente_top(df_total: pd.DataFrame):
         _insert_rows_top(ws, rows)
         print(f"[{sheet_name}] inseridas {len(rows)} linhas novas no topo.")
 
-# =========================================================
 #                        MAIN
-# =========================================================
 def main():
     senado = senado_df_hoje()
     camara = camara_df_hoje()
