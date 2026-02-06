@@ -173,10 +173,8 @@ def process_sheet(ws):
     df.columns = [c.strip() for c in df.columns]
 
     # garante colunas de saída
-    if OUT_ALINH_COL not in df.columns:
-        df[OUT_ALINH_COL] = ""
-    if OUT_JUST_COL not in df.columns:
-        df[OUT_JUST_COL] = ""
+    df[OUT_ALINH_COL] = df.get(OUT_ALINH_COL, "")
+    df[OUT_JUST_COL] = df.get(OUT_JUST_COL, "")
 
     if EMENTA_COL not in df.columns:
         print(f"[{title}] coluna '{EMENTA_COL}' não encontrada — pulando.")
@@ -192,7 +190,7 @@ def process_sheet(ws):
         return
 
     for start in range(0, len(to_process), BATCH_SIZE):
-        batch_idx = to_process[start:start+BATCH_SIZE]
+        batch_idx = to_process[start:start + BATCH_SIZE]
         for i in batch_idx:
             res = classify_ementa(df.at[i, EMENTA_COL], nome_cli, desc_cli)
             df.at[i, OUT_ALINH_COL] = res["alinhamento"]
@@ -200,7 +198,6 @@ def process_sheet(ws):
             if SLEEP_SEC:
                 time.sleep(SLEEP_SEC)
 
-        # grava até a última linha do lote processado
         set_with_dataframe(ws, df.iloc[:max(batch_idx)+1],
                            include_index=False, include_column_header=True, resize=False)
         print(f"[{title}] 💾 salvo linhas até {max(batch_idx)+2}")
@@ -211,7 +208,6 @@ def main():
         print("Planilha sem abas.")
         return
 
-    # percorre todas as abas, exceto a última
     for ws in worksheets[:-1]:
         process_sheet(ws)
 
