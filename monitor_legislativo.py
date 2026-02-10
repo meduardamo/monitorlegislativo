@@ -111,7 +111,7 @@ def _get_senado(url, **kw):
 
 # Mapa: Cliente → Tema → Keywords (whole-word)
 CLIENT_THEME_DATA = """
-IAS|Educação|matemática; alfabetização; alfabetização matemática; recomposição de aprendizagem; plano nacional de educação;
+IAS|Educação|matemática; alfabetização; alfabetização matemática; recomposição de aprendizagem; plano nacional de educação
 ISG|Educação|tempo integral; fundeb; ensino técnico profissionalizante; educação profissional e tecnológica; ensino médio; propag; infraestrutura escolar; ensino fundamental integral; alfabetização integral; escola em tempo integral; programa escola em tempo integral; ensino fundamental em tempo integral
 IU|Educação|recomposição da aprendizagem; educação em tempo integral; fundeb; educação e equidade; educação profissional e tecnológica; ensino técnico profissionalizante
 Reúna|Educação|matemática; alfabetização; alfabetização matemática; recomposição de aprendizagem; plano nacional de educação; emendas parlamentares
