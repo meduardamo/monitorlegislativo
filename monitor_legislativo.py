@@ -10,8 +10,17 @@ except Exception:  # py<3.9
 
 TZ_BR = ZoneInfo("America/Sao_Paulo")
 now_br = lambda: datetime.now(TZ_BR)
-today_iso = lambda: now_br().date().strftime("%Y-%m-%d")
-today_compact = lambda: now_br().date().strftime("%Y%m%d")
+
+# Permite backfill de um dia específico via env (formato YYYY-MM-DD).
+# Vazio = usa a data de hoje (comportamento normal do agendamento).
+_DATA_OVERRIDE = os.getenv("DATA_OVERRIDE", "").strip()
+def _base_date():
+    if _DATA_OVERRIDE:
+        return datetime.strptime(_DATA_OVERRIDE, "%Y-%m-%d").date()
+    return now_br().date()
+
+today_iso = lambda: _base_date().strftime("%Y-%m-%d")
+today_compact = lambda: _base_date().strftime("%Y%m%d")
 
 # HTTP
 HDR = {
