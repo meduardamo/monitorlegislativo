@@ -7,7 +7,12 @@ on:
     - cron: "0 17 * * *"  # 14h BRT
     - cron: "0 20 * * *"  # 17h BRT
     - cron: "0 2 * * *"   # 23h BRT
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      data:
+        description: "Backfill de um dia (YYYY-MM-DD). Vazio = hoje."
+        required: false
+        default: ""
 
 jobs:
   run:
@@ -39,6 +44,7 @@ jobs:
           SHEET_SENADO: ${{ secrets.SHEET_SENADO }}
           SHEET_CAMARA: ${{ secrets.SHEET_CAMARA }}
           GOOGLE_APPLICATION_CREDENTIALS: credentials.json
+          DATA_OVERRIDE: ${{ github.event.inputs.data }}
         run: |
           python monitor_legislativo.py
 
