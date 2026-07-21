@@ -2,11 +2,11 @@ name: Monitor Legislativo
 
 on:
   schedule:
-    - cron: "0 11 * * *"  # 08h BRT
-    - cron: "0 15 * * *"  # 12h BRT
-    - cron: "0 17 * * *"  # 14h BRT
-    - cron: "0 20 * * *"  # 17h BRT
-    - cron: "0 2 * * *"   # 23h BRT
+    - cron: "18 11 * * *"  # 08:18 BRT
+    - cron: "18 15 * * *"  # 12:18 BRT
+    - cron: "18 17 * * *"  # 14:18 BRT
+    - cron: "18 20 * * *"  # 17:18 BRT
+    - cron: "18 2 * * *"   # 23:18 BRT
   workflow_dispatch:
     inputs:
       data:
