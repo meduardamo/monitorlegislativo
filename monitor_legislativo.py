@@ -1,5 +1,5 @@
 import os, re, time, requests, pandas as pd, unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 # Timezone BR
@@ -22,6 +22,33 @@ def _base_date():
 today_iso = lambda: _base_date().strftime("%Y-%m-%d")
 today_compact = lambda: _base_date().strftime("%Y%m%d")
 
+# Janela de consulta. Antes o monitor buscava só o dia corrente e nunca
+# revisitava dias passados: se todos os runs de um dia falhassem, as proposições
+# daquele dia ficavam perdidas para sempre (foi o que houve em 12/07/2026, com
+# as APIs da Câmara e do Senado fora do ar). Consultando os últimos dias, um dia
+# perdido é recuperado pelo primeiro run que voltar a funcionar.
+# Com DATA_OVERRIDE (backfill) a janela é sempre o dia pedido, e só ele.
+_JANELA_DIAS = max(1, int(os.getenv("JANELA_DIAS", "3")))
+
+
+def _dia_inicial():
+    if _DATA_OVERRIDE:
+        return _base_date()
+    return _base_date() - timedelta(days=_JANELA_DIAS - 1)
+
+
+inicio_iso = lambda: _dia_inicial().strftime("%Y-%m-%d")
+inicio_compact = lambda: _dia_inicial().strftime("%Y%m%d")
+
+# UIDs já gravados, carregados uma vez antes da raspagem. Servem para pular o
+# enriquecimento (autores, inteiro teor) do que já está na planilha: sem isso a
+# janela de 3 dias triplicaria as chamadas às APIs em todo run.
+_UIDS_CONHECIDOS: set[str] = set()
+
+
+def _ja_gravado(uid: str) -> bool:
+    return uid in _UIDS_CONHECIDOS
+
 # HTTP
 HDR = {
     "Accept": "application/json,text/html,*/*",
@@ -32,7 +59,11 @@ HDR = {
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 _sess = requests.Session()
-_retry = Retry(total=3, backoff_factor=0.3, status_forcelist=(500, 502, 503, 504))
+# backoff_factor 0.3 dava esperas de 0,6s e 1,2s: curto demais para as quedas
+# das APIs do Congresso, que duram minutos. Com 2.0 as esperas viram 4s, 8s e
+# 16s, e o run atravessa uma indisponibilidade curta em vez de morrer.
+_retry = Retry(total=4, backoff_factor=2.0,
+               status_forcelist=(429, 500, 502, 503, 504))
 _sess.headers.update(HDR)
 _sess.mount("https://", HTTPAdapter(max_retries=_retry))
 _sess.mount("http://",  HTTPAdapter(max_retries=_retry))
@@ -360,7 +391,7 @@ def _senado_primeira_autoria_da_pagina(codigo_materia) -> str | None:
         return None
 
 def senado_df_hoje() -> pd.DataFrame:
-    params = {"dataInicioApresentacao": today_compact(), "dataFimApresentacao": today_compact()}
+    params = {"dataInicioApresentacao": inicio_compact(), "dataFimApresentacao": today_compact()}
     r = _get_senado(BASE_PESQUISA_SF, params=params, timeout=60); r.raise_for_status()
     j = r.json()
     materias = (_dig(j, ("PesquisaBasicaMateria","Materias","Materia"))
@@ -377,6 +408,9 @@ def senado_df_hoje() -> pd.DataFrame:
         ident = m.get("IdentificacaoMateria", {}) if isinstance(m.get("IdentificacaoMateria"), dict) else {}
 
         codigo = _get(m, "Codigo") or _get(ident, "CodigoMateria")
+        # já está na planilha: não gasta chamadas de autoria/inteiro teor
+        if codigo and _ja_gravado(f"Senado:{codigo}"):
+            continue
         sigla  = (_get(m, "Sigla") or _get(dados, "SiglaSubtipoMateria", "SiglaMateria")
                   or _get(ident, "SiglaSubtipoMateria", "SiglaMateria"))
         numero = _get(m, "Numero") or _get(dados, "NumeroMateria") or _get(ident, "NumeroMateria")
@@ -594,7 +628,7 @@ def _camara_inteiro_teor(prop_id:int):
     return None, None
 
 def camara_df_hoje() -> pd.DataFrame:
-    params = {"dataApresentacaoInicio": today_iso(),
+    params = {"dataApresentacaoInicio": inicio_iso(),
               "dataApresentacaoFim": today_iso(),
               "ordem":"DESC","ordenarPor":"id","itens":100,"pagina":1}
     rows = []
@@ -603,6 +637,9 @@ def camara_df_hoje() -> pd.DataFrame:
         j = r.json()
         for d in j.get("dados", []):
             pid = d.get("id")
+            # já está na planilha: não gasta chamadas de autoria/inteiro teor
+            if _ja_gravado(f"Camara:{pid}"):
+                continue
             data = _parse_data_apresentacao_camara_text(d.get("dataApresentacao"))
             if data is None:
                 try:
@@ -813,7 +850,32 @@ def insert_por_cliente_top(df_total: pd.DataFrame):
         print(f"[{sheet_name}] inseridas {len(rows)} linhas novas no topo.")
 
 #                        MAIN
+def _preload_uids():
+    """Carrega os UIDs já gravados antes de raspar.
+
+    A janela de dias faz a consulta trazer proposições que já estão na planilha.
+    Sem esta pré-carga, cada uma delas gastaria de novo as chamadas de autoria e
+    de inteiro teor antes de ser descartada na deduplicação.
+    """
+    if not SPREADSHEET_ID:
+        return
+    try:
+        sh = _open_sheet(SPREADSHEET_ID)
+        for aba in (SHEET_SENADO, SHEET_CAMARA):
+            try:
+                _UIDS_CONHECIDOS.update(_existing_uids(sh.worksheet(aba)))
+            except Exception as e:
+                print(f"[{aba}] não deu para ler os UIDs existentes: {e}")
+        print(f"{len(_UIDS_CONHECIDOS)} proposições já gravadas serão puladas.")
+    except Exception as e:
+        # sem a pré-carga o run continua: só fica mais lento, não fica errado
+        print(f"Pré-carga de UIDs falhou ({e}); seguindo sem ela.")
+
+
 def main():
+    print(f"Janela consultada: {inicio_iso()} a {today_iso()}"
+          + (" (backfill)" if _DATA_OVERRIDE else ""))
+    _preload_uids()
     senado = senado_df_hoje()
     camara = camara_df_hoje()
 
