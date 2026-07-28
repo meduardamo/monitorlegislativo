@@ -49,6 +49,23 @@ _UIDS_CONHECIDOS: set[str] = set()
 def _ja_gravado(uid: str) -> bool:
     return uid in _UIDS_CONHECIDOS
 
+
+def _resumo_coleta(casa: str, vistas: int, puladas: int, novas: int) -> None:
+    """Distingue 'a API não devolveu nada' de 'devolveu, mas já tínhamos tudo'.
+
+    Sem isso, os dois casos apareciam no log como '0 linhas' e um dia sem
+    coleta ficava indistinguível de um dia sem proposições.
+    """
+    if vistas == 0:
+        print(f"[{casa}] a API não devolveu nenhuma proposição na janela "
+              f"{inicio_iso()} a {today_iso()}.")
+    elif novas == 0:
+        print(f"[{casa}] {vistas} proposições na janela, todas já gravadas. "
+              f"Nada novo.")
+    else:
+        print(f"[{casa}] {vistas} proposições na janela: {novas} novas, "
+              f"{puladas} já gravadas.")
+
 # HTTP
 HDR = {
     "Accept": "application/json,text/html,*/*",
@@ -401,15 +418,18 @@ def senado_df_hoje() -> pd.DataFrame:
     materias = _as_list(materias)
 
     rows = []
+    vistas = puladas = 0
     for m in materias:
-        if not isinstance(m, dict): 
+        if not isinstance(m, dict):
             continue
+        vistas += 1
         dados = m.get("DadosBasicosMateria", {}) if isinstance(m.get("DadosBasicosMateria"), dict) else {}
         ident = m.get("IdentificacaoMateria", {}) if isinstance(m.get("IdentificacaoMateria"), dict) else {}
 
         codigo = _get(m, "Codigo") or _get(ident, "CodigoMateria")
         # já está na planilha: não gasta chamadas de autoria/inteiro teor
         if codigo and _ja_gravado(f"Senado:{codigo}"):
+            puladas += 1
             continue
         sigla  = (_get(m, "Sigla") or _get(dados, "SiglaSubtipoMateria", "SiglaMateria")
                   or _get(ident, "SiglaSubtipoMateria", "SiglaMateria"))
@@ -494,6 +514,7 @@ def senado_df_hoje() -> pd.DataFrame:
             "Ingest At": _fmt_dt(now_br()),
         })
 
+    _resumo_coleta("Senado", vistas, puladas, len(rows))
     df = pd.DataFrame(rows)
     if not df.empty:
         df = df.sort_values(["Data Apresentação","UID"], ascending=[False, False]).reset_index(drop=True)
@@ -632,13 +653,16 @@ def camara_df_hoje() -> pd.DataFrame:
               "dataApresentacaoFim": today_iso(),
               "ordem":"DESC","ordenarPor":"id","itens":100,"pagina":1}
     rows = []
+    vistas = puladas = 0
     while True:
         r = _get_default(BASE_CAMARA, params=params, timeout=60); r.raise_for_status()
         j = r.json()
         for d in j.get("dados", []):
             pid = d.get("id")
+            vistas += 1
             # já está na planilha: não gasta chamadas de autoria/inteiro teor
             if _ja_gravado(f"Camara:{pid}"):
+                puladas += 1
                 continue
             data = _parse_data_apresentacao_camara_text(d.get("dataApresentacao"))
             if data is None:
@@ -684,10 +708,12 @@ def camara_df_hoje() -> pd.DataFrame:
         params["pagina"] += 1
         time.sleep(0.15)
 
+    _resumo_coleta("Câmara", vistas, puladas, len(rows))
     df = pd.DataFrame(rows)
     if not df.empty:
         df = df.sort_values(["Data Apresentação","UID"], ascending=[False, False]).reset_index(drop=True)
     return df
+
 
 #                 INSERÇÃO no Google Sheets (dedupe, topo)
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")  # planilha geral
