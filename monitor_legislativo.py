@@ -1,4 +1,4 @@
-import os, re, time, requests, pandas as pd, unicodedata
+import os, re, sys, time, requests, pandas as pd, unicodedata
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
@@ -77,9 +77,11 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 _sess = requests.Session()
 # backoff_factor 0.3 dava esperas de 0,6s e 1,2s: curto demais para as quedas
-# das APIs do Congresso, que duram minutos. Com 2.0 as esperas viram 4s, 8s e
-# 16s, e o run atravessa uma indisponibilidade curta em vez de morrer.
-_retry = Retry(total=4, backoff_factor=2.0,
+# das APIs do Congresso, que duram minutos. Com 2.0 as esperas viram 4s, 8s,
+# 16s e 32s, e o run atravessa uma indisponibilidade curta em vez de morrer.
+# Não adianta subir muito mais: cada tentativa ainda paga o timeout de conexão
+# de 60s, e quedas longas são resolvidas pelo isolamento por casa no main().
+_retry = Retry(total=5, backoff_factor=2.0,
                status_forcelist=(429, 500, 502, 503, 504))
 _sess.headers.update(HDR)
 _sess.mount("https://", HTTPAdapter(max_retries=_retry))
@@ -898,12 +900,38 @@ def _preload_uids():
         print(f"Pré-carga de UIDs falhou ({e}); seguindo sem ela.")
 
 
+def _coleta_isolada(nome: str, fn):
+    """
+    Roda a coleta de uma casa sem deixar a queda da API dela derrubar a outra.
+    As APIs do Congresso caem em horários diferentes, e antes disso um
+    ConnectTimeout na Câmara jogava fora a coleta do Senado que já tinha dado
+    certo. Devolve (df, ok).
+    """
+    try:
+        return fn(), True
+    except Exception as e:
+        print(f"[{nome}] coleta falhou: {type(e).__name__}: {e}")
+        return pd.DataFrame(), False
+
+
 def main():
     print(f"Janela consultada: {inicio_iso()} a {today_iso()}"
           + (" (backfill)" if _DATA_OVERRIDE else ""))
     _preload_uids()
-    senado = senado_df_hoje()
-    camara = camara_df_hoje()
+    senado, ok_senado = _coleta_isolada("Senado", senado_df_hoje)
+    camara, ok_camara = _coleta_isolada("Câmara", camara_df_hoje)
+
+    if not ok_senado and not ok_camara:
+        # nada coletado: é falha de verdade, o run tem que ficar vermelho
+        print("::error::As duas casas falharam na coleta; nada foi gravado.")
+        sys.exit(1)
+
+    if not ok_senado or not ok_camara:
+        # parcial: grava o que veio e marca o run com aviso, sem exit != 0,
+        # para o passo de alinhamento ainda rodar sobre o que foi gravado
+        caiu = "Senado" if not ok_senado else "Câmara"
+        print(f"::warning::Coleta parcial: a API do {caiu} não respondeu. "
+              f"O run seguinte cobre a janela, que é de {_JANELA_DIAS} dias.")
 
     print(f"Senado: {len(senado)} linhas | Câmara: {len(camara)} linhas")
 
