@@ -52,7 +52,7 @@ jobs:
 
       - name: Run alignment
         env:
-          GENAI_API_KEY: ${{ secrets.GENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           SPREADSHEET_ID_CLIENTES: ${{ secrets.SPREADSHEET_ID_CLIENTES }}
           GOOGLE_APPLICATION_CREDENTIALS: credentials.json
           # Optional tuning:
