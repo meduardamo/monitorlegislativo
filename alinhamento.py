@@ -8,7 +8,7 @@ from string import Template
 
 GENAI_API_KEY = os.getenv("GENAI_API_KEY", "").strip()
 assert GENAI_API_KEY, "Defina o secret GENAI_API_KEY."
-MODEL_NAME = os.getenv("GENAI_MODEL", "gemini-2.5-flash").strip()
+MODEL_NAME = os.getenv("GENAI_MODEL", "gemini-3.6-flash").strip()
 
 SPREADSHEET_ID_CLIENTES = os.getenv("SPREADSHEET_ID_CLIENTES", "").strip()
 assert SPREADSHEET_ID_CLIENTES, "Defina o secret SPREADSHEET_ID_CLIENTES."
