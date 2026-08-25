@@ -151,10 +151,16 @@ def _label_with_party_uf(nome: str|None, partido: str|None=None, uf: str|None=No
     return nome
 
 def _rotulo_proposicao(sigla: str|None, numero: str|None, ano: str|None) -> str:
-    """Sigla, número e ano numa coluna só: 'PL 1234/2026'."""
+    """Sigla, número e ano numa coluna só: 'PL 1234/2026'.
+
+    Pareceres e relatórios da Câmara vêm com ano 0; nesses o rótulo fica só
+    'PRL 1', sem o '/0'.
+    """
     s = str(sigla or "").strip()
     n = str(numero or "").strip()
     a = str(ano or "").strip()
+    if n == "0": n = ""
+    if a == "0": a = ""
     if n and a:
         return f"{s} {n}/{a}".strip()
     if n:
