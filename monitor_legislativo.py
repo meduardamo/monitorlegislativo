@@ -150,6 +150,19 @@ def _label_with_party_uf(nome: str|None, partido: str|None=None, uf: str|None=No
         return f"{nome} ({u})"
     return nome
 
+def _rotulo_proposicao(sigla: str|None, numero: str|None, ano: str|None) -> str:
+    """Sigla, número e ano numa coluna só: 'PL 1234/2026'."""
+    s = str(sigla or "").strip()
+    n = str(numero or "").strip()
+    a = str(ano or "").strip()
+    if n and a:
+        return f"{s} {n}/{a}".strip()
+    if n:
+        return f"{s} {n}".strip()
+    if a:
+        return f"{s} {a}".strip()
+    return s
+
 # ---------------------- GET helpers ----------------------
 def _get_default(url, **kw):
     return _sess.get(url, **kw)
@@ -495,16 +508,14 @@ def senado_df_hoje() -> pd.DataFrame:
         rows.append({
             "UID": f"Senado:{codigo}",
             "Casa Atual": "Senado",
-            "Sigla": sigla, "Número": numero, "Ano": ano,
+            "Proposição": _rotulo_proposicao(sigla, numero, ano),
             "Data Apresentação": _fmt_date(data),
             "Ementa": ementa,
             "Palavras Chave": kw_str,
             "Clientes": clientes_str,
             "Temas": temas_str,
-            # autoria granular
-            "Autor Principal": ap_nome,
-            "Autor Principal Partido": ap_part or "",
-            "Autor Principal UF": ap_uf or "",
+            # autoria
+            "Autor Principal": _label_with_party_uf(ap_nome, ap_part, ap_uf),
             "Autor Principal Tipo": ap_tipo,
             "Coautores": coau,
             "Qtd Coautores": str(qtd_coaut),
@@ -683,18 +694,16 @@ def camara_df_hoje() -> pd.DataFrame:
             rows.append({
                 "UID": f"Camara:{pid}",
                 "Casa Atual": "Camara",
-                "Sigla": d.get("siglaTipo"),
-                "Número": d.get("numero"),
-                "Ano": d.get("ano"),
+                "Proposição": _rotulo_proposicao(d.get("siglaTipo"), d.get("numero"), d.get("ano")),
                 "Data Apresentação": _fmt_date(data),
                 "Ementa": ementa,
                 "Palavras Chave": kw_str,
                 "Clientes": clientes_str,
                 "Temas": temas_str,
-                # autoria granular
-                "Autor Principal": autores.get("ap_nome",""),
-                "Autor Principal Partido": autores.get("ap_partido",""),
-                "Autor Principal UF": autores.get("ap_uf",""),
+                # autoria
+                "Autor Principal": _label_with_party_uf(autores.get("ap_nome",""),
+                                                        autores.get("ap_partido",""),
+                                                        autores.get("ap_uf","")),
                 "Autor Principal Tipo": autores.get("ap_tipo",""),
                 "Coautores": autores.get("coautores",""),
                 "Qtd Coautores": autores.get("qtd_coaut","0"),
@@ -727,11 +736,11 @@ CREDENTIALS_JSON = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "credentials
 
 NEEDED_COLUMNS = [
     "UID","Casa Atual",
-    "Sigla","Número","Ano",
+    "Proposição",
     "Data Apresentação","Ementa",
     "Palavras Chave","Clientes","Temas",
-    # autoria granular
-    "Autor Principal","Autor Principal Partido","Autor Principal UF","Autor Principal Tipo",
+    # autoria
+    "Autor Principal","Autor Principal Tipo",
     "Coautores","Qtd Coautores",
     # links e auditoria
     "Link Página","Inteiro Teor URL",
