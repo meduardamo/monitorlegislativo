@@ -771,16 +771,71 @@ def _open_sheet(spreadsheet_id: str):
     gc = gspread.authorize(creds)
     return gc.open_by_key(spreadsheet_id)
 
+_MOLDE_CABECALHO: dict[str, list[str]] = {}
+
+
+def _cabecalho_modelo(sh, ignorar: str | None = None) -> list[str]:
+    """Cabeçalho de uma aba já existente da planilha, para servir de molde.
+
+    A aba nova nasce com as mesmas colunas das outras, inclusive as que o
+    alinhamento.py acrescenta depois (Alinhamento, Justificativa), que não estão
+    em NEEDED_COLUMNS. Só serve de molde a aba que tem UID no cabeçalho, para
+    não copiar o formato de abas de outra natureza (ex.: Giro de notícias).
+    """
+    cache_key = f"{sh.id}|{ignorar or ''}"
+    if cache_key in _MOLDE_CABECALHO:
+        return _MOLDE_CABECALHO[cache_key]
+
+    molde = NEEDED_COLUMNS[:]
+    try:
+        for ws in sh.worksheets():
+            if ignorar and ws.title.strip() == ignorar:
+                continue
+            header = _sheet_header(ws)
+            if "UID" in header:
+                molde = header
+                break
+    except Exception as e:
+        print(f"Não deu para ler um cabeçalho de molde ({e}); usando NEEDED_COLUMNS.")
+
+    _MOLDE_CABECALHO[cache_key] = molde
+    return molde
+
+
+def _criar_aba(sh, name: str, header: list[str]):
+    ws = sh.add_worksheet(title=name, rows=1000, cols=max(len(header), 20))
+    ws.update(values=[header], range_name="A1", value_input_option="USER_ENTERED")
+    try:
+        ws.freeze(rows=1)
+    except Exception as e:
+        print(f"[{name}] aba criada, mas não deu para congelar o cabeçalho: {e}")
+    print(f"[{name}] aba criada com {len(header)} colunas.")
+    return ws
+
+
+def _abrir_ou_criar_aba(sh, name: str, header: list[str] | None = None):
+    """Abre a aba; se ela não existir, cria com o cabeçalho das abas irmãs.
+
+    Só a ausência da aba (WorksheetNotFound) leva à criação. Erro de rede ou de
+    permissão sobe, para não criar aba duplicada em cima de uma falha passageira.
+    """
+    import gspread
+    try:
+        return sh.worksheet(name)
+    except gspread.exceptions.WorksheetNotFound:
+        return _criar_aba(sh, name, header or _cabecalho_modelo(sh, ignorar=name))
+
+
 def ensure_headers(spreadsheet_id: str, sheet_names: list[str]):
-    """NO-OP: não cria abas e não altera cabeçalhos. Apenas checa se existem."""
+    """Garante que as abas existem, criando as que faltam. Não mexe em cabeçalho já gravado."""
     if not spreadsheet_id or not sheet_names:
         return
     sh = _open_sheet(spreadsheet_id)
     for name in sheet_names:
         try:
-            sh.worksheet(name)
-        except Exception:
-            print(f"[{name}] aba não encontrada na planilha {spreadsheet_id} — pulando (não crio automaticamente).")
+            _abrir_ou_criar_aba(sh, name)
+        except Exception as e:
+            print(f"[{name}] não deu para abrir nem criar a aba na planilha {spreadsheet_id}: {e}")
 
 # Helpers de alinhamento/insert
 def _sheet_header(ws) -> list[str]:
@@ -831,9 +886,9 @@ def insert_dedupe_top(df: pd.DataFrame, sheet_name: str):
 
     sh = _open_sheet(SPREADSHEET_ID)
     try:
-        ws = sh.worksheet(sheet_name)
-    except Exception:
-        print(f"[{sheet_name}] aba inexistente na planilha geral — pulando (não crio automaticamente).")
+        ws = _abrir_ou_criar_aba(sh, sheet_name)
+    except Exception as e:
+        print(f"[{sheet_name}] não deu para abrir nem criar a aba na planilha geral: {e}")
         return
 
     df = _normalize_columns(df)
@@ -874,9 +929,9 @@ def insert_por_cliente_top(df_total: pd.DataFrame):
             continue
 
         try:
-            ws = sh.worksheet(sheet_name)
-        except Exception:
-            print(f"[{sheet_name}] aba inexistente na planilha de clientes — pulando (não crio automaticamente).")
+            ws = _abrir_ou_criar_aba(sh, sheet_name)
+        except Exception as e:
+            print(f"[{sheet_name}] não deu para abrir nem criar a aba na planilha de clientes: {e}")
             continue
 
         exists = _existing_uids(ws)
@@ -949,7 +1004,7 @@ def main():
 
     print(f"Senado: {len(senado)} linhas | Câmara: {len(camara)} linhas")
 
-    # Checa existência das abas (não cria / não altera cabeçalho)
+    # Garante as abas (cria a que faltar; não altera cabeçalho já gravado)
     if SPREADSHEET_ID:
         ensure_headers(SPREADSHEET_ID, [SHEET_SENADO, SHEET_CAMARA])
     if SPREADSHEET_ID_CLIENTES:
